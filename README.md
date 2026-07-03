@@ -4,6 +4,9 @@ A Python desktop application built using Tkinter, Pandas, and Numba to model hom
 
 The application parses ESB Networks HDF (Harmonised Data Files) containing 30-minute smart meter interval readings. It simulates battery performance across standard fixed tariffs, custom tariffs, and dynamic wholesale energy plans, and displays a ranked leaderboard of estimated annual bills.
 
+> [!IMPORTANT]
+> **Baseline Load Profile Requirement:** This simulation works best with baseline (pre-battery) load profiles. If your HDF file already contains battery storage or energy arbitraging usage, this will show up as solar export on the file and distort the simulation outputs.
+
 ---
 
 ## Features
@@ -32,8 +35,9 @@ The application parses ESB Networks HDF (Harmonised Data Files) containing 30-mi
 
 The repository contains anonymized sample data files to test the optimizer:
 * **`HDF_calckWh_SAMPLE_23-06-2025.csv`**: Anonymized 30-minute interval smart meter reading data.
+* **`energypal tarriffs 03072026.csv`**: A sample tariff spreadsheet database downloaded from EnergyPal.ie containing standard smart plans.
 * **`Dynamic tarrif supplier fixed costs_260626.csv`**: Fixed supply cost parameters for dynamic plans.
-* **`DAM prices MAy 2026.csv`**: Sample Day-Ahead Market pricing.
+* **`DAM prices MAy 2026.csv`**: Sample Day-Ahead Market pricing. To update this for future months, download the monthly market reports from [SEMOpx Reports](https://www.semopx.com/news/monthly-market-report-may-2026), copy the first 3 columns of the "Auction_to" sheet of the report Excel document, and save as a CSV.
 
 ---
 
@@ -61,7 +65,7 @@ The repository contains anonymized sample data files to test the optimizer:
 ## How to Use
 
 1. **HDF File:** Select your ESB HDF file (or use the provided `HDF_calckWh_SAMPLE_23-06-2025.csv`).
-2. **Tariff DB:** Select a tariff database CSV file (if available), or use the **Create Custom Tariff** button to enter plan rates manually.
+2. **Tariff DB:** Select a tariff database CSV file (such as the provided `energypal tarriffs 03072026.csv`), or use the **Create Custom Tariff** button to enter plan rates manually.
 3. **DAM & Dynamic Adders (Optional):** Load the Day-Ahead Market prices and Dynamic Supplier fixed costs files to enable dynamic tariff comparison.
 4. **Hardware Configuration:** Enter your battery capacity, charge rate limits, depth of discharge bounds, and round-trip efficiency percentages.
 5. **Run Sweep:** Click **Run Optimization Sweep** to compute and display results.

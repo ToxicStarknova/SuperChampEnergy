@@ -453,23 +453,37 @@ class HomeBatteryCalculatorApp:
         # 1. Files
         files_frame = ttk.LabelFrame(left_panel, text=" 1. Input Source Files ", padding=10)
         files_frame.pack(fill=tk.X, pady=(0, 10))
-        ttk.Label(files_frame, text="ESB HDF:").grid(row=0, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(files_frame, textvariable=self.hdf_path, width=25).grid(row=0, column=1, padx=2, pady=2)
-        ttk.Button(files_frame, text="Browse", command=self.browse_hdf).grid(row=0, column=2, pady=2)
         
-        ttk.Label(files_frame, text="Tariff DB:").grid(row=1, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(files_frame, textvariable=self.tariff_path, width=25).grid(row=1, column=1, padx=2, pady=2)
-        ttk.Button(files_frame, text="Browse", command=self.browse_tariff).grid(row=1, column=2, pady=2)
-
-        ttk.Label(files_frame, text="DAM Prices (Opt):").grid(row=2, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(files_frame, textvariable=self.dam_path, width=25).grid(row=2, column=1, padx=2, pady=2)
-        ttk.Button(files_frame, text="Browse", command=self.browse_dam).grid(row=2, column=2, pady=2)
-
-        ttk.Label(files_frame, text="Dyn Adders (Opt):").grid(row=3, column=0, sticky=tk.W, pady=2)
-        ttk.Entry(files_frame, textvariable=self.dynamic_adders_path, width=25).grid(row=3, column=1, padx=2, pady=2)
-        ttk.Button(files_frame, text="Browse", command=self.browse_dyn).grid(row=3, column=2, pady=2)
+        # Warning Disclaimer: HDF profile baseline requirement
+        lbl_warn = ttk.Label(files_frame, text="* WARNING: Works best with baseline (pre-battery) HDF files.\n  Existing battery storage/arbitraging will distort results.",
+                             foreground="#ef4444", font=("Helvetica", 8, "italic"), justify=tk.LEFT)
+        lbl_warn.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 8))
         
-        ttk.Button(files_frame, text="+ Create Custom Tariff", style="Secondary.TButton", command=self.open_custom_tariff_dialog).grid(row=4, column=0, columnspan=3, pady=(5, 0), sticky=tk.EW)
+        lbl_hdf = ttk.Label(files_frame, text="ESB HDF:", font=("Helvetica", 9, "underline"), cursor="hand2")
+        lbl_hdf.grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(files_frame, textvariable=self.hdf_path, width=25).grid(row=1, column=1, padx=2, pady=2)
+        ttk.Button(files_frame, text="Browse", command=self.browse_hdf).grid(row=1, column=2, pady=2)
+        ToolTip(lbl_hdf, "Smart meter readings in calculated 30-min kWh intervals from ESB Networks. Works best with un-metered/pre-battery baseline profiles.")
+        
+        lbl_tariff = ttk.Label(files_frame, text="Tariff DB:", font=("Helvetica", 9, "underline"), cursor="hand2")
+        lbl_tariff.grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(files_frame, textvariable=self.tariff_path, width=25).grid(row=2, column=1, padx=2, pady=2)
+        ttk.Button(files_frame, text="Browse", command=self.browse_tariff).grid(row=2, column=2, pady=2)
+        ToolTip(lbl_tariff, "Tariff spreadsheet database. Rates can be downloaded from www.energypal.ie under the smartplans table (download button is at the bottom of the table).")
+
+        lbl_dam = ttk.Label(files_frame, text="DAM Prices (Opt):", font=("Helvetica", 9, "underline"), cursor="hand2")
+        lbl_dam.grid(row=3, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(files_frame, textvariable=self.dam_path, width=25).grid(row=3, column=1, padx=2, pady=2)
+        ttk.Button(files_frame, text="Browse", command=self.browse_dam).grid(row=3, column=2, pady=2)
+        ToolTip(lbl_dam, "Day-Ahead Market wholesale prices. Download reports from semopx.com (e.g. May 2026). Copy the first 3 columns of 'Auction_to' sheet as CSV.")
+
+        lbl_dyn = ttk.Label(files_frame, text="Dyn Adders (Opt):", font=("Helvetica", 9, "underline"), cursor="hand2")
+        lbl_dyn.grid(row=4, column=0, sticky=tk.W, pady=2)
+        ttk.Entry(files_frame, textvariable=self.dynamic_adders_path, width=25).grid(row=4, column=1, padx=2, pady=2)
+        ttk.Button(files_frame, text="Browse", command=self.browse_dyn).grid(row=4, column=2, pady=2)
+        ToolTip(lbl_dyn, "Supplier standing charges and unit cost adjustments for dynamic wholesale tariffs (loaded from CSV).")
+        
+        ttk.Button(files_frame, text="+ Create Custom Tariff", style="Secondary.TButton", command=self.open_custom_tariff_dialog).grid(row=5, column=0, columnspan=3, pady=(5, 0), sticky=tk.EW)
         
         # 2. Hardware Config
         params_frame = ttk.LabelFrame(left_panel, text=" 2. Battery & Grid Hardware Configuration ", padding=10)
