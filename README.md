@@ -57,7 +57,7 @@ The repository contains anonymized sample data files to test the optimizer:
 
 3. **Run the application:**
    ```bash
-   python Super_Champ_V20.py
+   python Super_Champ_Optimizer.py
    ```
 
 ---

@@ -356,15 +356,16 @@ def run_simulation(df_hdf, import_prices, export_price, strategy, force_charge_h
     pre_charge_mask = pre_charge_hours[hour_array]
     
     cheapest_import_rate = np.min(import_prices.values[force_charge_mask]) if np.any(force_charge_mask) else 99.0
-    arb_prof = (export_price * grid_rte) > cheapest_import_rate
-    is_arbitrage_profitable_mask = np.full(len(df_hdf), arb_prof, dtype=np.bool_)
+    arb_margin_c_kwh = ((export_price * grid_rte) - cheapest_import_rate) * 100.0
+    is_arbitrage_profitable = arb_margin_c_kwh > 0
+    is_arbitrage_profitable_mask = np.full(len(df_hdf), is_arbitrage_profitable, dtype=np.bool_)
     
     grid_imports, grid_exports, soc_track = _fast_simulate(
         df_hdf['consumption'].values, df_hdf['generation'].values, hour_array, df_hdf.index.month.values, 
         force_charge_mask, pre_charge_mask, is_arbitrage_profitable_mask, usable_cap_kwh, min_soc_kwh, max_soc_kwh, grid_rte, 
         solar_charge_efficiency, grid_efficiency_sqrt, params['charge_rate'], params['mic'], params['mec'], strategy_map.get(strategy, 0)
     )
-    return grid_imports, grid_exports, soc_track, arb_prof
+    return grid_imports, grid_exports, soc_track, arb_margin_c_kwh
 
 def run_dynamic_simulation(df_hdf, import_prices, export_price, strategy, params):
     usable_cap_kwh = params['capacity'] * (params['usable_pct'] / 100.0)
@@ -401,7 +402,12 @@ def run_dynamic_simulation(df_hdf, import_prices, export_price, strategy, params
         force_charge_mask, pre_charge_mask, is_arbitrage_profitable_mask, usable_cap_kwh, min_soc_kwh, max_soc_kwh, grid_rte, 
         solar_charge_efficiency, grid_efficiency_sqrt, params['charge_rate'], params['mic'], params['mec'], strategy_map.get(strategy, 0)
     )
-    return grid_imports, grid_exports, soc_track, np.any(is_arbitrage_profitable_mask)
+    
+    # Calculate average dynamic arbitrage return
+    cheapest_import_rate = np.mean(import_prices.values[force_charge_mask]) if np.any(force_charge_mask) else 99.0
+    arb_margin_c_kwh = ((export_price * grid_rte) - cheapest_import_rate) * 100.0
+    
+    return grid_imports, grid_exports, soc_track, arb_margin_c_kwh
 
 # =====================================================================
 # 2. TKINTER GUI APPLICATION
@@ -410,7 +416,7 @@ def run_dynamic_simulation(df_hdf, import_prices, export_price, strategy, params
 class HomeBatteryCalculatorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Home Battery & Tariff Optimization Tool - V2.0")
+        self.root.title("Home Battery & Tariff Optimization Tool - V2.1")
         self.root.geometry("1720x920")
         self.root.minsize(1400, 780)
         
@@ -434,6 +440,26 @@ class HomeBatteryCalculatorApp:
         self.style.configure("Secondary.TButton", font=("Helvetica", 9))
         
         self.setup_ui()
+        
+    def treeview_sort_column(self, tv, col, reverse):
+        l = []
+        for k in tv.get_children(''):
+            val = tv.set(k, col)
+            l.append((val, k))
+            
+        def clean_val(val):
+            val_clean = str(val).replace('€', '').replace('c/kWh', '').replace('%', '').replace(',', '').strip()
+            try:
+                return (1, float(val_clean))
+            except ValueError:
+                return (0, val_clean.lower())
+                
+        l.sort(key=lambda t: clean_val(t[0]), reverse=reverse)
+        
+        for index, (val, k) in enumerate(l):
+            tv.move(k, '', index)
+            
+        tv.heading(col, command=lambda: self.treeview_sort_column(tv, col, not reverse))
         
     def setup_ui(self):
         main_frame = ttk.Frame(self.root, padding=15)
@@ -596,7 +622,7 @@ class HomeBatteryCalculatorApp:
         self.tree.heading("supplier", text="Supplier")
         self.tree.heading("tariff", text="Tariff Name")
         self.tree.heading("strategy", text="Winning Strategy")
-        self.tree.heading("arbitrage", text="Arb. Viable?")
+        self.tree.heading("arbitrage", text="Arb. Return")
         self.tree.heading("imp_kwh", text="Imp (kWh)")
         self.tree.heading("exp_kwh", text="Exp (kWh)")
         self.tree.heading("import", text="Import Cost")
@@ -610,7 +636,7 @@ class HomeBatteryCalculatorApp:
         self.tree.column("supplier", width=100, anchor=tk.W)
         self.tree.column("tariff", width=190, anchor=tk.W)
         self.tree.column("strategy", width=150, anchor=tk.CENTER)
-        self.tree.column("arbitrage", width=70, anchor=tk.CENTER)
+        self.tree.column("arbitrage", width=100, anchor=tk.CENTER)
         self.tree.column("imp_kwh", width=75, anchor=tk.E)
         self.tree.column("exp_kwh", width=75, anchor=tk.E)
         self.tree.column("import", width=80, anchor=tk.E)
@@ -621,6 +647,11 @@ class HomeBatteryCalculatorApp:
         self.tree.column("bill", width=100, anchor=tk.E)
 
         self.tree.tag_configure('best_baseline', background='#ffedd5', foreground='#b45309')
+
+        # Bind sorting to columns
+        for col in cols:
+            self.tree.heading(col, text=self.tree.heading(col, 'text'), 
+                              command=lambda _col=col: self.treeview_sort_column(self.tree, _col, False))
 
         vsb = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -954,8 +985,15 @@ class HomeBatteryCalculatorApp:
                     strat_june = np.sum(strategy_import_costs[mask_june]) - np.sum(exports[mask_june] * fit_rate) + monthly_fixed
                     strat_dec = np.sum(strategy_import_costs[mask_dec]) - np.sum(exports[mask_dec] * fit_rate) + monthly_fixed
                     
+                    arb_display = "N/A"
+                    if strategy not in ['baseline-no-battery', 'self-consumption'] and is_arb is not None:
+                        if is_arb > 0:
+                            arb_display = f"{is_arb:.2f} c/kWh"
+                        else:
+                            arb_display = "N/A"
+                            
                     results.append({
-                        'Supplier': row['Supplier'], 'Tariff': row['Tariff name'], 'Strategy': strategy, 'Arbitrage': "Yes" if is_arb else "No", 
+                        'Supplier': row['Supplier'], 'Tariff': row['Tariff name'], 'Strategy': strategy, 'Arbitrage': arb_display, 
                         'Imp_kWh': strat_imp_kwh, 'Exp_kWh': strat_exp_kwh,
                         'Import': annual_imp_cost, 'Export': annual_exp_rev, 
                         'June': strat_june, 'Dec': strat_dec, 'Fixed': fixed_charges,
@@ -1019,8 +1057,15 @@ class HomeBatteryCalculatorApp:
                     strat_june = np.sum(strategy_import_costs[mask_june]) - np.sum(exports[mask_june] * fit_rate) + monthly_fixed
                     strat_dec = np.sum(strategy_import_costs[mask_dec]) - np.sum(exports[mask_dec] * fit_rate) + monthly_fixed
                     
+                    arb_display = "N/A"
+                    if strategy not in ['baseline-no-battery', 'self-consumption'] and is_arb is not None:
+                        if is_arb > 0:
+                            arb_display = f"{is_arb:.2f} c/kWh"
+                        else:
+                            arb_display = "N/A"
+                            
                     results.append({
-                        'Supplier': dyn['Supplier'], 'Tariff': dyn['Tariff name'], 'Strategy': strategy, 'Arbitrage': "Variable", 
+                        'Supplier': dyn['Supplier'], 'Tariff': dyn['Tariff name'], 'Strategy': strategy, 'Arbitrage': arb_display, 
                         'Imp_kWh': strat_imp_kwh, 'Exp_kWh': strat_exp_kwh,
                         'Import': annual_imp_cost, 'Export': annual_exp_rev, 
                         'June': strat_june, 'Dec': strat_dec, 'Fixed': fixed_charges,
