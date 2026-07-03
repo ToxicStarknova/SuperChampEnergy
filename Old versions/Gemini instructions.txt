@@ -1,0 +1,19 @@
+OK his might be a lot of changes....
+
+Ok, after looking at this I think it best we remove the feature where it scrubs the force discharging after 10pm its showing really odd numbers. and does not look right.. What we need to do it put a disclaimer maybe where the dialogue is to load up the HDF file that this tool works best for pre battery HDF data as having existing battery can mask your actual consumption, you can think of better wording  
+
+(Im thinking out loud here now where this might be another project is to create tool to make a HDF file out of for example Home assistant.  data...but for another day..) 
+
+can we also put a hover over description over the Grid RTE and Solar RTE to explain what these are 
+
+I am thinking also as people might not have access to pre battery HDF files we can store my HDF file and we can tick a box to use this if they want. Have a hover over with brief description of the profile. MY system is a 4 person house with A2W heat pump, EV, and 6.1kWp solar PV system. You can analyse the HDF file to calculate my total import and export.
+
+Also can have a description next to the tariff upload box to describe that tarrif rates can be downloaded from www.energypal.ie under the smartplans table a download button is on the bottom of the table. 
+
+For DAM pricing say these can be found every month on the SEMOpx website for example this month is here https://www.semopx.com/sites/semopx/files/2026-06/Lookback_Market%20May2026.zip and you need to download the file and copy out the first 3 columns of "Auction_to" sheet of the excel doc and save as csv. again we will upload the file and store it have tick box to download the file and stating that this is up to date end of MAy 2026 another tick box to use it 
+
+For the dynamic pricing I think for now we will do awy with the upland and we will store the current prices as I have attached here. Can we create a table so that we can just mannualy adjust these rates, I don't think they are going to change that often. But also have a facility to add a new supplier if they join the market.
+
+Rewrite the entire code for me     
+
+    
