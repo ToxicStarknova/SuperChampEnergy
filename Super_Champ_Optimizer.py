@@ -526,7 +526,7 @@ class HomeBatteryCalculatorApp:
         self.entry_usable_pct = ttk.Entry(params_frame, width=8); self.entry_usable_pct.insert(0, "100"); self.entry_usable_pct.grid(row=0, column=3, sticky=tk.W, pady=4, padx=5)
 
         ttk.Label(params_frame, text="Chg Rate (kW):").grid(row=1, column=0, sticky=tk.W, pady=4)
-        self.entry_charge_rate = ttk.Entry(params_frame, width=8); self.entry_charge_rate.insert(0, "15.0"); self.entry_charge_rate.grid(row=1, column=1, sticky=tk.W, pady=4, padx=5)
+        self.entry_charge_rate = ttk.Entry(params_frame, width=8); self.entry_charge_rate.insert(0, "10.0"); self.entry_charge_rate.grid(row=1, column=1, sticky=tk.W, pady=4, padx=5)
         
         ttk.Label(params_frame, text="Region:").grid(row=1, column=2, sticky=tk.W, pady=4)
         self.combo_region = ttk.Combobox(params_frame, values=["urban", "rural"], width=6, state="readonly"); self.combo_region.set("rural"); self.combo_region.grid(row=1, column=3, sticky=tk.W, pady=4, padx=5)
@@ -544,7 +544,7 @@ class HomeBatteryCalculatorApp:
         self.entry_mec = ttk.Entry(params_frame, width=8); self.entry_mec.insert(0, "6"); self.entry_mec.grid(row=3, column=3, sticky=tk.W, pady=4, padx=5)
 
         ttk.Label(params_frame, text="Grid RTE (%):").grid(row=4, column=0, sticky=tk.W, pady=4)
-        self.entry_grid_eff = ttk.Entry(params_frame, width=8); self.entry_grid_eff.insert(0, "90"); self.entry_grid_eff.grid(row=4, column=1, sticky=tk.W, pady=4, padx=5)
+        self.entry_grid_eff = ttk.Entry(params_frame, width=8); self.entry_grid_eff.insert(0, "95"); self.entry_grid_eff.grid(row=4, column=1, sticky=tk.W, pady=4, padx=5)
         
         ttk.Label(params_frame, text="Solar RTE (%):").grid(row=4, column=2, sticky=tk.W, pady=4)
         self.entry_solar_eff = ttk.Entry(params_frame, width=8); self.entry_solar_eff.insert(0, "85"); self.entry_solar_eff.grid(row=4, column=3, sticky=tk.W, pady=4, padx=5)
