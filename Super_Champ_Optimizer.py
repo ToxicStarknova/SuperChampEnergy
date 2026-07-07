@@ -314,10 +314,14 @@ def _fast_simulate(consumptions, generations, hours, months,
                         
             if is_force_charge_hour:
                 space_in_battery = max(0.0, max_soc_kwh - battery_soc)
-                home_import_power = grid_import / 0.5
-                available_grid_power = max(0.0, mic - home_import_power)
-                charge_power = min(charge_rate_limit, available_grid_power)
+                
+                # Charge battery at full rate set, capped only by physical MIC ceiling
+                charge_power = min(charge_rate_limit, mic)
                 energy_to_charge = min(max(0.0, charge_power * 0.5), space_in_battery / grid_efficiency_sqrt)
+                
+                # Modulate/reduce home import consumption to not exceed MIC
+                max_allowed_home_import = max(0.0, mic * 0.5 - energy_to_charge)
+                grid_import = min(grid_import, max_allowed_home_import)
                 
                 if energy_to_charge > 0.001:
                     battery_soc += energy_to_charge * grid_efficiency_sqrt
@@ -615,7 +619,7 @@ class HomeBatteryCalculatorApp:
         table_frame = ttk.Frame(tab_rankings)
         table_frame.pack(fill=tk.BOTH, expand=True)
 
-        cols = ("rank", "supplier", "tariff", "strategy", "arbitrage", "imp_kwh", "exp_kwh", "import", "export", "june", "dec", "fixed", "bill")
+        cols = ("rank", "supplier", "tariff", "strategy", "arbitrage", "imp_kwh", "exp_kwh", "import", "export", "june", "dec", "fixed", "bonus", "bill")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="none")
         
         self.tree.heading("rank", text="#")
@@ -630,6 +634,7 @@ class HomeBatteryCalculatorApp:
         self.tree.heading("june", text="June (€)")
         self.tree.heading("dec", text="Dec (€)")
         self.tree.heading("fixed", text="Fixed (€)")
+        self.tree.heading("bonus", text="Bonus (€)")
         self.tree.heading("bill", text="Annual Bill (€)")
 
         self.tree.column("rank", width=30, anchor=tk.CENTER)
@@ -644,6 +649,7 @@ class HomeBatteryCalculatorApp:
         self.tree.column("june", width=65, anchor=tk.E)
         self.tree.column("dec", width=65, anchor=tk.E)
         self.tree.column("fixed", width=65, anchor=tk.E)
+        self.tree.column("bonus", width=65, anchor=tk.E)
         self.tree.column("bill", width=100, anchor=tk.E)
 
         self.tree.tag_configure('best_baseline', background='#ffedd5', foreground='#b45309')
@@ -845,7 +851,10 @@ class HomeBatteryCalculatorApp:
         ttk.Label(frame, text="Export FIT (c/kWh):").grid(row=8, column=0, sticky=tk.W, pady=5)
         ent_fit = ttk.Entry(frame, width=10); ent_fit.insert(0, "18.0"); ent_fit.grid(row=8, column=1, sticky=tk.W, pady=5)
         
-        ev_frame = ttk.Frame(frame); ev_frame.grid(row=9, column=0, columnspan=4, sticky=tk.W, pady=10)
+        ttk.Label(frame, text="Cash Bonus (€):").grid(row=9, column=0, sticky=tk.W, pady=5)
+        ent_bonus = ttk.Entry(frame, width=10); ent_bonus.insert(0, "0.0"); ent_bonus.grid(row=9, column=1, sticky=tk.W, pady=5)
+        
+        ev_frame = ttk.Frame(frame); ev_frame.grid(row=10, column=0, columnspan=4, sticky=tk.W, pady=10)
         ttk.Label(ev_frame, text="EV Start Hour (0-23):").pack(side=tk.LEFT)
         ent_ev_start = ttk.Entry(ev_frame, width=4); ent_ev_start.insert(0, "2"); ent_ev_start.pack(side=tk.LEFT, padx=5)
         ttk.Label(ev_frame, text="End Hour:").pack(side=tk.LEFT)
@@ -855,7 +864,7 @@ class HomeBatteryCalculatorApp:
             try:
                 new_tariff = {
                     'Supplier': ent_sup.get().strip(), 'Tariff name': ent_name.get().strip() + " (Custom)", 'Plan type': combo_type.get(),
-                    'Standing charge': float(ent_sc.get() or 0.0), 'PSO Levy': 0.0, 'Cash bonus': 0.0, 'Day unit': float(ent_day.get() or 0.0),
+                    'Standing charge': float(ent_sc.get() or 0.0), 'PSO Levy': 0.0, 'Cash bonus': float(ent_bonus.get() or 0.0), 'Day unit': float(ent_day.get() or 0.0),
                     'Night unit': float(ent_night.get() or 0.0), 'Peak unit': float(ent_peak.get() or 0.0), 'Ev unit': float(ent_ev.get() or 0.0),
                     'Ev overage unit': float(ent_ev_overage.get() or 0.0), 'Fit unit': float(ent_fit.get() or 0.0), 
                     'Supply Region': self.combo_region.get().strip().lower(), 
@@ -866,7 +875,7 @@ class HomeBatteryCalculatorApp:
                 dlg.destroy()
             except ValueError:
                 messagebox.showerror("Error", "Please ensure all rates and hours are valid numbers.", parent=dlg)
-        ttk.Button(frame, text="Save & Add to Database", command=save_tariff).grid(row=10, column=0, columnspan=4, pady=15, sticky=tk.EW)
+        ttk.Button(frame, text="Save & Add to Database", command=save_tariff).grid(row=11, column=0, columnspan=4, pady=15, sticky=tk.EW)
 
     def run_sweep(self):
         if not self.hdf_path.get() or (not self.tariff_path.get() and not self.custom_tariffs):
@@ -944,13 +953,14 @@ class HomeBatteryCalculatorApp:
                 
                 tid = f"T_{int_id}"; int_id += 1
                 self.detailed_results[tid] = {'meta': row.to_dict()}
-                fixed_charges = float(row['Standing charge']) + float(row.get('PSO Levy', 0)) - (float(row.get('Cash bonus', 0)) if not pd.isna(row.get('Cash bonus')) else 0.0)
+                fixed_charges = float(row['Standing charge']) + float(row.get('PSO Levy', 0))
+                cash_bonus = float(row.get('Cash bonus', 0.0)) if not pd.isna(row.get('Cash bonus')) else 0.0
                 monthly_fixed = fixed_charges / 12.0
 
                 baseline_import_costs, base_limit_exceeded = _calc_cost_with_overage(orig_imports, import_prices.values, is_ev_window, ev_overage_rate, months_array, has_overage_penalty)
                 annual_imp_base = np.sum(baseline_import_costs)
                 annual_exp_base = np.sum(orig_exports * fit_rate)
-                net_bill_base = (annual_imp_base - annual_exp_base) * scaling_factor + fixed_charges
+                net_bill_base = (annual_imp_base - annual_exp_base) * scaling_factor + fixed_charges - cash_bonus
                 
                 base_imp_kwh = np.sum(orig_imports)
                 base_exp_kwh = np.sum(orig_exports)
@@ -964,6 +974,7 @@ class HomeBatteryCalculatorApp:
                     'Arbitrage': "N/A", 'Imp_kWh': base_imp_kwh, 'Exp_kWh': base_exp_kwh,
                     'Import': annual_imp_base, 'Export': annual_exp_base, 
                     'June': base_june, 'Dec': base_dec, 'Fixed': fixed_charges,
+                    'Bonus': cash_bonus,
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': False
                 })
 
@@ -977,7 +988,7 @@ class HomeBatteryCalculatorApp:
                         
                     annual_imp_cost = np.sum(strategy_import_costs)
                     annual_exp_rev = np.sum(exports * fit_rate)
-                    net_bill = (annual_imp_cost - annual_exp_rev) * scaling_factor + fixed_charges
+                    net_bill = (annual_imp_cost - annual_exp_rev) * scaling_factor + fixed_charges - cash_bonus
                     
                     strat_imp_kwh = np.sum(imports)
                     strat_exp_kwh = np.sum(exports)
@@ -997,6 +1008,7 @@ class HomeBatteryCalculatorApp:
                         'Imp_kWh': strat_imp_kwh, 'Exp_kWh': strat_exp_kwh,
                         'Import': annual_imp_cost, 'Export': annual_exp_rev, 
                         'June': strat_june, 'Dec': strat_dec, 'Fixed': fixed_charges,
+                        'Bonus': cash_bonus,
                         'Bill': net_bill, '_id': tid, 'is_dynamic': False
                     })
 
@@ -1004,6 +1016,7 @@ class HomeBatteryCalculatorApp:
             for dyn in dynamic_suppliers:
                 fit_rate = dyn['Fit unit'] / 100.0
                 fixed_charges = dyn['Standing charge'] * 1.09  # Add 9% VAT
+                cash_bonus = dyn.get('Cash bonus', 0.0)
                 monthly_fixed = fixed_charges / 12.0
                 
                 prices = dam_prices_c_kwh.copy()
@@ -1022,7 +1035,7 @@ class HomeBatteryCalculatorApp:
                 baseline_import_costs, base_limit_exceeded = _calc_cost_with_overage(orig_imports, import_prices.values, dyn_is_ev_window, dyn_ev_overage_rate, months_array, False)
                 annual_imp_base = np.sum(baseline_import_costs)
                 annual_exp_base = np.sum(orig_exports * fit_rate)
-                net_bill_base = (annual_imp_base - annual_exp_base) * scaling_factor + fixed_charges
+                net_bill_base = (annual_imp_base - annual_exp_base) * scaling_factor + fixed_charges - cash_bonus
                 
                 base_imp_kwh = np.sum(orig_imports)
                 base_exp_kwh = np.sum(orig_exports)
@@ -1036,6 +1049,7 @@ class HomeBatteryCalculatorApp:
                     'Arbitrage': "N/A", 'Imp_kWh': base_imp_kwh, 'Exp_kWh': base_exp_kwh,
                     'Import': annual_imp_base, 'Export': annual_exp_base, 
                     'June': base_june, 'Dec': base_dec, 'Fixed': fixed_charges,
+                    'Bonus': cash_bonus,
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': True
                 })
 
@@ -1049,7 +1063,7 @@ class HomeBatteryCalculatorApp:
                         
                     annual_imp_cost = np.sum(strategy_import_costs)
                     annual_exp_rev = np.sum(exports * fit_rate)
-                    net_bill = (annual_imp_cost - annual_exp_rev) * scaling_factor + fixed_charges
+                    net_bill = (annual_imp_cost - annual_exp_rev) * scaling_factor + fixed_charges - cash_bonus
                     
                     strat_imp_kwh = np.sum(imports)
                     strat_exp_kwh = np.sum(exports)
@@ -1069,6 +1083,7 @@ class HomeBatteryCalculatorApp:
                         'Imp_kWh': strat_imp_kwh, 'Exp_kWh': strat_exp_kwh,
                         'Import': annual_imp_cost, 'Export': annual_exp_rev, 
                         'June': strat_june, 'Dec': strat_dec, 'Fixed': fixed_charges,
+                        'Bonus': cash_bonus,
                         'Bill': net_bill, '_id': tid, 'is_dynamic': True
                     })
 
@@ -1113,6 +1128,7 @@ class HomeBatteryCalculatorApp:
                     f"{row['Imp_kWh']:,.0f}", f"{row['Exp_kWh']:,.0f}", 
                     f"€ {row['Import']:,.2f}", f"€ {row['Export']:,.2f}",
                     f"€ {row['June']:,.2f}", f"€ {row['Dec']:,.2f}", f"€ {row['Fixed']:,.2f}",
+                    f"€ {row['Bonus']:,.2f}",
                     f"€ {row['Bill']:,.2f}"
                 ), tags=tags)
 
