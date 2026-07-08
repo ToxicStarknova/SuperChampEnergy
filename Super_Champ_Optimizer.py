@@ -880,15 +880,15 @@ class HomeBatteryCalculatorApp:
         if not filepath: return
         try:
             end_times = self.df_hdf.index + pd.Timedelta(minutes=30)
-            formatted_times = end_times.strftime('%d-%m-%Y %H:%M')
+            formatted_times = end_times.strftime('%d/%m/%Y %H:%M')
             import_vals = sim_data['import']
             export_vals = sim_data['export']
             mprn_col = str(self.mprn) if self.mprn else "12345678912"
             meter_col = str(self.meter_serial) if self.meter_serial else "SIMULATED_METER"
             rows = []
             for t, imp, exp in zip(formatted_times, import_vals, export_vals):
-                rows.append([mprn_col, meter_col, f"{imp:.4f}", "Active Import Interval Value", t])
-                rows.append([mprn_col, meter_col, f"{exp:.4f}", "Active Export Interval Value", t])
+                rows.append([mprn_col, meter_col, f"{imp:.4f}", "Active Import Interval (kWh)", t])
+                rows.append([mprn_col, meter_col, f"{exp:.4f}", "Active Export Interval (kWh)", t])
             df_export = pd.DataFrame(rows, columns=['MPRN', 'Meter Serial Number', 'Read Value', 'Read Type', 'Read Date and End Time'])
             with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
                 f.write(f"MPRN,Meter Serial Number,Read Value,Read Type,Read Date and End Time\n")
