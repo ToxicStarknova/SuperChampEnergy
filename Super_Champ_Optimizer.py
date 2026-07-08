@@ -886,13 +886,11 @@ class HomeBatteryCalculatorApp:
             mprn_col = str(self.mprn) if self.mprn else "12345678912"
             meter_col = str(self.meter_serial) if self.meter_serial else "SIMULATED_METER"
             rows = []
-            for t, imp, exp in zip(formatted_times, import_vals, export_vals):
+            for t, imp, exp in reversed(list(zip(formatted_times, import_vals, export_vals))):
                 rows.append([mprn_col, meter_col, f"{imp:.4f}", "Active Import Interval (kWh)", t])
                 rows.append([mprn_col, meter_col, f"{exp:.4f}", "Active Export Interval (kWh)", t])
             df_export = pd.DataFrame(rows, columns=['MPRN', 'Meter Serial Number', 'Read Value', 'Read Type', 'Read Date and End Time'])
-            with open(filepath, 'w', encoding='utf-8-sig', newline='') as f:
-                f.write(f"MPRN,Meter Serial Number,Read Value,Read Type,Read Date and End Time\n")
-                df_export.to_csv(f, index=False, header=False)
+            df_export.to_csv(filepath, index=False, encoding='utf-8')
             messagebox.showinfo("Success", f"Simulated HDF exported successfully to:\n{os.path.basename(filepath)}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export simulated HDF:\n{str(e)}")
