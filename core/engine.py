@@ -2,9 +2,9 @@ import re
 import numpy as np
 import pandas as pd
 from numba import njit
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
 
-from core.models import SimulationParams
+from core.models import SimulationParams, DualTariffParams, DualTariffResult
 
 @njit
 def _calc_cost_with_overage(imports: np.ndarray, prices: np.ndarray, is_ev_window: np.ndarray, 
@@ -210,7 +210,6 @@ def run_dynamic_simulation(df_hdf: pd.DataFrame, import_prices: pd.Series, expor
         'import-minimiser-summer-pass': 4
     }
     
-    # Adaptive force-charging calculation: compute required 30-min intervals based on battery size & charge rate
     hours_to_charge = usable_cap_kwh / max(0.5, params.charge_rate)
     req_intervals = max(4, min(16, int(round(hours_to_charge * 2.0))))
     
@@ -250,3 +249,103 @@ def run_dynamic_simulation(df_hdf: pd.DataFrame, import_prices: pd.Series, expor
         arb_margin_c_kwh = ((export_price * grid_rte) - cheapest_import_rate) * 100.0
     
     return grid_imports, grid_exports, soc_track, arb_margin_c_kwh
+
+
+def evaluate_dual_tariffs(df_res: pd.DataFrame, df_hdf: pd.DataFrame, 
+                          dual_params: DualTariffParams) -> List[DualTariffResult]:
+    """
+    Evaluates seasonal switching between a Winter Tariff and a Summer Tariff,
+    deducting early contract cancellation fees to find optimal dual-tariff combinations.
+    """
+    if df_res.empty or df_hdf.empty:
+        return []
+
+    # Exclude baseline rows
+    df_active = df_res[df_res['Strategy'] != 'baseline-no-battery'].copy()
+    if df_active.empty:
+        return []
+
+    months_array = df_hdf.index.month.values
+    winter_mask = np.isin(months_array, dual_params.winter_months)
+    summer_mask = np.isin(months_array, dual_params.summer_months)
+    
+    num_winter_months = len(dual_params.winter_months)
+    num_summer_months = len(dual_params.summer_months)
+    
+    single_best_bill = df_active['Bill'].min()
+
+    # Find best strategy for each unique tariff in winter vs summer
+    unique_tariffs = df_active[['Supplier', 'Tariff', '_id', 'Fixed', 'Bonus']].drop_duplicates().to_dict('records')
+    
+    seasonal_tariff_profiles = []
+    for t_info in unique_tariffs:
+        tid = t_info['_id']
+        sub_rows = df_active[df_active['_id'] == tid]
+        
+        # Calculate seasonal cost for each strategy under this tariff
+        winter_best_cost = 999999.0
+        winter_best_strat = ""
+        summer_best_cost = 999999.0
+        summer_best_strat = ""
+        
+        for _, row in sub_rows.iterrows():
+            strat = row['Strategy']
+            # Reconstruct net monthly sums for winter vs summer
+            # Import cost - Export revenue during winter
+            # We approximate winter/summer net from row data proportional to energy sums
+            imp_cost = row['Import']
+            exp_rev = row['Export']
+            
+            # Weighted seasonal split
+            winter_ratio = np.sum(winter_mask) / len(winter_mask)
+            summer_ratio = np.sum(summer_mask) / len(summer_mask)
+            
+            c_winter = (imp_cost - exp_rev) * winter_ratio + (row['Fixed'] * (num_winter_months / 12.0))
+            c_summer = (imp_cost - exp_rev) * summer_ratio + (row['Fixed'] * (num_summer_months / 12.0))
+            
+            if c_winter < winter_best_cost:
+                winter_best_cost = c_winter
+                winter_best_strat = strat
+                
+            if c_summer < summer_best_cost:
+                summer_best_cost = c_summer
+                summer_best_strat = strat
+                
+        seasonal_tariff_profiles.append({
+            'Supplier': t_info['Supplier'],
+            'Tariff': t_info['Tariff'],
+            '_id': tid,
+            'Fixed': t_info['Fixed'],
+            'Bonus': t_info['Bonus'],
+            'winter_cost': winter_best_cost,
+            'winter_strat': winter_best_strat,
+            'summer_cost': summer_best_cost,
+            'summer_strat': summer_best_strat
+        })
+
+    dual_results = []
+    total_exit_fees = dual_params.total_annual_fees
+    
+    for w in seasonal_tariff_profiles:
+        for s in seasonal_tariff_profiles:
+            # Dual-tariff annual bill = Winter Cost + Summer Cost + Exit Fees - Cash Bonuses
+            net_bill = w['winter_cost'] + s['summer_cost'] + total_exit_fees - w['Bonus'] - s['Bonus']
+            extra_savings = single_best_bill - net_bill
+            
+            dual_results.append(DualTariffResult(
+                winter_supplier=w['Supplier'],
+                winter_tariff=w['Tariff'],
+                winter_strategy=str(w['winter_strat']).replace('-', ' ').title(),
+                winter_cost=round(w['winter_cost'], 2),
+                summer_supplier=s['Supplier'],
+                summer_tariff=s['Tariff'],
+                summer_strategy=str(s['summer_strat']).replace('-', ' ').title(),
+                summer_cost=round(s['summer_cost'], 2),
+                total_exit_fees=round(total_exit_fees, 2),
+                net_annual_bill=round(net_bill, 2),
+                extra_savings_vs_single_best=round(extra_savings, 2)
+            ))
+            
+    # Sort by lowest net annual bill
+    dual_results.sort(key=lambda x: x.net_annual_bill)
+    return dual_results

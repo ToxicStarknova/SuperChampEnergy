@@ -11,14 +11,14 @@ import numpy as np
 import customtkinter as ctk
 from typing import Dict, Any, List, Optional
 
-
-from core.models import SimulationParams, FinancialROIParams, FinancialROICalculator
+from core.models import SimulationParams, FinancialROIParams, FinancialROICalculator, DualTariffParams, DualTariffResult
 from core.parsers import (parse_hdf, filter_last_12_full_months, normalize_tariff_dataframe, 
                           get_half_hourly_rates_for_row, prepare_dam, parse_dynamic_suppliers, MONTH_NAMES)
-from core.engine import run_simulation, run_dynamic_simulation, _calc_cost_with_overage
+from core.engine import run_simulation, run_dynamic_simulation, _calc_cost_with_overage, evaluate_dual_tariffs
 from core.report_generator import generate_html_report
 from ui.components import ToolTip, CustomTariffDialog, FinancialROIDialog
 from ui.charts import ChartManager, HAS_MATPLOTLIB
+from ui.dual_tariff_dialog import DualTariffDialog
 
 if HAS_MATPLOTLIB:
     from matplotlib.figure import Figure
@@ -56,6 +56,7 @@ class HomeBatteryCalculatorApp:
             'electricity_inflation_pct': 3.0,
             'annual_degradation_pct': 2.0
         }
+        self.dual_params = DualTariffParams()
         
         self.status_queue = queue.Queue()
         self.setup_ui()
@@ -73,10 +74,13 @@ class HomeBatteryCalculatorApp:
                      font=("Segoe UI", 22, "bold"), text_color=("#4f46e5", "#818cf8")).pack(side=tk.LEFT)
         
         ctk.CTkButton(header_frame, text="⚙️ Financial ROI Setup", width=140, fg_color="transparent", border_width=1,
-                      text_color=("#4f46e5", "#818cf8"), command=self.open_financial_roi_dialog).pack(side=tk.RIGHT, padx=6)
+                      text_color=("#4f46e5", "#818cf8"), command=self.open_financial_roi_dialog).pack(side=tk.RIGHT, padx=4)
+
+        ctk.CTkButton(header_frame, text="🔀 Dual-Tariff Analysis", width=150, fg_color="transparent", border_width=1,
+                      text_color=("#0284c7", "#38bdf8"), command=self.open_dual_tariff_dialog).pack(side=tk.RIGHT, padx=4)
         
         ctk.CTkButton(header_frame, text="📄 Export HTML Report", width=150, fg_color="#10b981", hover_color="#059669",
-                      command=self.export_html_report).pack(side=tk.RIGHT, padx=6)
+                      command=self.export_html_report).pack(side=tk.RIGHT, padx=4)
 
         # Workspace PanedWindow
         workspace = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
@@ -168,7 +172,8 @@ class HomeBatteryCalculatorApp:
             ("• Import-Minimiser", "Force-charges from grid during cheapest hours.", "Force-charges the battery system up to max capacity during the lowest cost daily tariff window."),
             ("• Export-Maximiser", "Dumps battery to grid before cheap hours.", "Forces a proactive battery energy dump directly to the grid in the 4 hours prior to the cheap window starting."),
             ("• Balanced-Export", "Arbitrages in summer; preserves winter power.", "Runs arbitrage dump protocols during spring/summer, but preserves winter heating security bounds."),
-            ("• Import-Min (Pass)", "Bypasses battery charging in summer cycle.", "Prevents solar generation from charging battery between March and October to bypass structural round efficiency losses.")
+            ("• Import-Min (Pass)", "Bypasses battery charging in summer cycle.", "Prevents solar generation from charging battery between March and October to bypass structural round efficiency losses."),
+            ("• Ideal Daily Adaptive", "Oracle EMS: Picks optimal strategy each day.", "Evaluates every strategy on each individual day to model theoretical maximum smart EMS savings benchmark.")
         ]
         
         for label_text, brief_text, tip_text in strategies_info:
@@ -436,7 +441,6 @@ class HomeBatteryCalculatorApp:
             sorted_indices = []
             for k in tv.get_children(''):
                 row_vals = tv.item(k)['values']
-                # Match by Supplier, Tariff, Strategy
                 supp, t_name, strat = row_vals[1], row_vals[2], row_vals[3].lower().replace(' ', '-')
                 match = self.leaderboard_data[(self.leaderboard_data['Supplier'] == supp) & (self.leaderboard_data['Tariff'] == t_name)]
                 if not match.empty:
@@ -469,6 +473,18 @@ class HomeBatteryCalculatorApp:
                 self.refresh_kpi_cards()
         FinancialROIDialog(self.root, self.roi_params, update_params)
 
+    def open_dual_tariff_dialog(self):
+        if self.leaderboard_data is None or self.leaderboard_data.empty or self.df_hdf is None:
+            messagebox.showwarning("Warning", "No simulation results available. Please run an optimization sweep first.")
+            return
+
+        def recalculate(new_dual_params):
+            self.dual_params = new_dual_params
+            return evaluate_dual_tariffs(self.leaderboard_data, self.df_hdf, self.dual_params)
+
+        dual_results = evaluate_dual_tariffs(self.leaderboard_data, self.df_hdf, self.dual_params)
+        DualTariffDialog(self.root, dual_results, self.dual_params, recalculate)
+
     def start_sweep_thread(self):
         if not self.hdf_path.get() or (not self.tariff_path.get() and not self.custom_tariffs):
             messagebox.showerror("Error", "Please select an HDF file and a Tariff DB (or Custom Tariff).")
@@ -493,7 +509,6 @@ class HomeBatteryCalculatorApp:
         self.btn_run.configure(state="disabled", text="Running Optimization Sweep...")
         self.update_console("Parsing Input Data & Pre-compiling Engine Tracks...", "#f59e0b")
         
-        # Launch non-blocking background thread
         thread = threading.Thread(target=self._run_sweep_worker, args=(params,), daemon=True)
         thread.start()
 
@@ -533,9 +548,10 @@ class HomeBatteryCalculatorApp:
             orig_imports = df_hdf['consumption'].values
             orig_exports = df_hdf['generation'].values
             months_array = df_hdf.index.month.values
+            dates_array = df_hdf.index.date
             mask_june, mask_dec = (months_array == 6), (months_array == 12)
 
-            unique_dates = np.unique(df_hdf.index.date)
+            unique_dates = np.unique(dates_array)
             num_days = len(unique_dates)
             scaling_factor = 365.0 / num_days if num_days > 0 else 1.0
             is_short_duration = num_days < 330
@@ -581,7 +597,6 @@ class HomeBatteryCalculatorApp:
                 
                 base_imp_kwh, base_exp_kwh = np.sum(orig_imports), np.sum(orig_exports)
                 
-                # Scaled June/Dec sums for partial datasets
                 days_june = max(1, np.sum(mask_june) // 48)
                 days_dec = max(1, np.sum(mask_dec) // 48)
                 base_june = (np.sum(baseline_import_costs[mask_june]) - np.sum(orig_exports[mask_june] * fit_rate)) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
@@ -596,6 +611,9 @@ class HomeBatteryCalculatorApp:
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': False
                 })
 
+                # Track daily strategy outputs for ideal adaptive calculation
+                daily_strat_sims = {}
+
                 for strategy in all_strategies:
                     imports, exports, soc, is_arb = run_simulation(df_hdf, import_prices, fit_rate, strategy, force_charge_hours, params)
                     detailed_results[tid][strategy] = {'import': imports, 'export': exports, 'soc': soc}
@@ -604,6 +622,11 @@ class HomeBatteryCalculatorApp:
                     if strat_limit_exceeded:
                         exceeded_plans.append(f"{row['Supplier']} {row['Tariff name']} ({strategy})")
                         
+                    daily_strat_sims[strategy] = {
+                        'imports': imports, 'exports': exports, 'soc': soc, 
+                        'costs': strategy_import_costs, 'exp_rev': exports * fit_rate
+                    }
+                    
                     annual_imp_cost = np.sum(strategy_import_costs)
                     annual_exp_rev = np.sum(exports * fit_rate)
                     net_bill = (annual_imp_cost - annual_exp_rev) * scaling_factor + fixed_charges - cash_bonus
@@ -621,6 +644,49 @@ class HomeBatteryCalculatorApp:
                         'June': strat_june, 'Dec': strat_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
                         'Bill': net_bill, '_id': tid, 'is_dynamic': False
                     })
+
+                # --- IDEAL DAILY ADAPTIVE STRATEGY (ORACLE EMS) ---
+                ideal_imp = np.zeros(len(df_hdf))
+                ideal_exp = np.zeros(len(df_hdf))
+                ideal_soc = np.zeros(len(df_hdf))
+                ideal_costs = np.zeros(len(df_hdf))
+                ideal_exp_rev = np.zeros(len(df_hdf))
+                strategy_win_counts = {s: 0 for s in all_strategies}
+
+                for dt in unique_dates:
+                    dt_mask = (dates_array == dt)
+                    best_day_cost = 999999.0
+                    best_strat_key = all_strategies[0]
+                    
+                    for strat in all_strategies:
+                        day_net_cost = np.sum(daily_strat_sims[strat]['costs'][dt_mask]) - np.sum(daily_strat_sims[strat]['exp_rev'][dt_mask])
+                        if day_net_cost < best_day_cost:
+                            best_day_cost = day_net_cost
+                            best_strat_key = strat
+                            
+                    strategy_win_counts[best_strat_key] += 1
+                    ideal_imp[dt_mask] = daily_strat_sims[best_strat_key]['imports'][dt_mask]
+                    ideal_exp[dt_mask] = daily_strat_sims[best_strat_key]['exports'][dt_mask]
+                    ideal_soc[dt_mask] = daily_strat_sims[best_strat_key]['soc'][dt_mask]
+                    ideal_costs[dt_mask] = daily_strat_sims[best_strat_key]['costs'][dt_mask]
+                    ideal_exp_rev[dt_mask] = daily_strat_sims[best_strat_key]['exp_rev'][dt_mask]
+
+                detailed_results[tid]['ideal-daily-adaptive'] = {'import': ideal_imp, 'export': ideal_exp, 'soc': ideal_soc, 'win_counts': strategy_win_counts}
+                
+                annual_ideal_imp_cost = np.sum(ideal_costs)
+                annual_ideal_exp_rev = np.sum(ideal_exp_rev)
+                net_bill_ideal = (annual_ideal_imp_cost - annual_ideal_exp_rev) * scaling_factor + fixed_charges - cash_bonus
+                
+                ideal_june = (np.sum(ideal_costs[mask_june]) - np.sum(ideal_exp_rev[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
+                ideal_dec = (np.sum(ideal_costs[mask_dec]) - np.sum(ideal_exp_rev[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+
+                results.append({
+                    'Supplier': row['Supplier'], 'Tariff': tariff_label, 'Strategy': 'ideal-daily-adaptive', 
+                    'Arbitrage': "Adaptive", 'Imp_kWh': np.sum(ideal_imp), 'Exp_kWh': np.sum(ideal_exp),
+                    'Import': annual_ideal_imp_cost, 'Export': annual_ideal_exp_rev, 
+                    'June': ideal_june, 'Dec': ideal_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
+                    'Bill': net_bill_ideal, '_id': tid, 'is_dynamic': False
+                })
 
             # 2. Dynamic Tariff Sweep Track
             for dyn in dynamic_suppliers:
@@ -673,11 +739,19 @@ class HomeBatteryCalculatorApp:
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': True
                 })
 
+                daily_strat_sims = {}
+
                 for strategy in all_strategies:
                     imports, exports, soc, is_arb = run_dynamic_simulation(df_hdf, import_prices, fit_rate, strategy, params)
                     detailed_results[tid][strategy] = {'import': imports, 'export': exports, 'soc': soc}
                     
                     strategy_import_costs, strat_limit_exceeded = _calc_cost_with_overage(imports, import_prices.values, dyn_is_ev_window, dyn_ev_overage_rate, months_array, False)
+                    
+                    daily_strat_sims[strategy] = {
+                        'imports': imports, 'exports': exports, 'soc': soc, 
+                        'costs': strategy_import_costs, 'exp_rev': exports * fit_rate
+                    }
+
                     annual_imp_cost = np.sum(strategy_import_costs)
                     annual_exp_rev = np.sum(exports * fit_rate)
                     net_bill = (annual_imp_cost - annual_exp_rev) * scaling_factor + fixed_charges - cash_bonus
@@ -695,6 +769,49 @@ class HomeBatteryCalculatorApp:
                         'June': strat_june, 'Dec': strat_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
                         'Bill': net_bill, '_id': tid, 'is_dynamic': True
                     })
+
+                # Ideal Daily Adaptive for Dynamic
+                ideal_imp = np.zeros(len(df_hdf))
+                ideal_exp = np.zeros(len(df_hdf))
+                ideal_soc = np.zeros(len(df_hdf))
+                ideal_costs = np.zeros(len(df_hdf))
+                ideal_exp_rev = np.zeros(len(df_hdf))
+                strategy_win_counts = {s: 0 for s in all_strategies}
+
+                for dt in unique_dates:
+                    dt_mask = (dates_array == dt)
+                    best_day_cost = 999999.0
+                    best_strat_key = all_strategies[0]
+                    
+                    for strat in all_strategies:
+                        day_net_cost = np.sum(daily_strat_sims[strat]['costs'][dt_mask]) - np.sum(daily_strat_sims[strat]['exp_rev'][dt_mask])
+                        if day_net_cost < best_day_cost:
+                            best_day_cost = day_net_cost
+                            best_strat_key = strat
+                            
+                    strategy_win_counts[best_strat_key] += 1
+                    ideal_imp[dt_mask] = daily_strat_sims[best_strat_key]['imports'][dt_mask]
+                    ideal_exp[dt_mask] = daily_strat_sims[best_strat_key]['exports'][dt_mask]
+                    ideal_soc[dt_mask] = daily_strat_sims[best_strat_key]['soc'][dt_mask]
+                    ideal_costs[dt_mask] = daily_strat_sims[best_strat_key]['costs'][dt_mask]
+                    ideal_exp_rev[dt_mask] = daily_strat_sims[best_strat_key]['exp_rev'][dt_mask]
+
+                detailed_results[tid]['ideal-daily-adaptive'] = {'import': ideal_imp, 'export': ideal_exp, 'soc': ideal_soc, 'win_counts': strategy_win_counts}
+                
+                annual_ideal_imp_cost = np.sum(ideal_costs)
+                annual_ideal_exp_rev = np.sum(ideal_exp_rev)
+                net_bill_ideal = (annual_ideal_imp_cost - annual_ideal_exp_rev) * scaling_factor + fixed_charges - cash_bonus
+                
+                ideal_june = (np.sum(ideal_costs[mask_june]) - np.sum(ideal_exp_rev[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
+                ideal_dec = (np.sum(ideal_costs[mask_dec]) - np.sum(ideal_exp_rev[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+
+                results.append({
+                    'Supplier': dyn['Supplier'], 'Tariff': dyn['Tariff name'], 'Strategy': 'ideal-daily-adaptive', 
+                    'Arbitrage': "Adaptive", 'Imp_kWh': np.sum(ideal_imp), 'Exp_kWh': np.sum(ideal_exp),
+                    'Import': annual_ideal_imp_cost, 'Export': annual_ideal_exp_rev, 
+                    'June': ideal_june, 'Dec': ideal_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
+                    'Bill': net_bill_ideal, '_id': tid, 'is_dynamic': True
+                })
 
             calc_time = time.time() - start_time
             df_res = pd.DataFrame(results)
@@ -737,13 +854,13 @@ class HomeBatteryCalculatorApp:
         scaling_factor = payload['scaling_factor']
 
         mem_usage_kb = df_res.memory_usage(deep=True).sum() / 1024.0
-        total_sims = num_tariffs * 6
+        total_sims = num_tariffs * 7
         total_steps = total_rows * total_sims
         
         telemetry = (
             f"[✓] Data Points: {total_rows:,} ({num_days} days)\n"
             f"[✓] Tariffs Evaluated: {num_tariffs}\n"
-            f"[✓] Total Simulations: {total_sims:,} runs\n"
+            f"[✓] Total Simulations: {total_sims:,} runs (inc. Ideal Adaptive)\n"
             f"⚡ Iterations Computed: {total_steps:,} steps\n"
             f"⏱️ CPU Exec Time: {calc_time:.4f} seconds\n"
             f"📊 Data Frame Memory: {mem_usage_kb:.1f} KB"
@@ -974,7 +1091,10 @@ class HomeBatteryCalculatorApp:
             }
             
             winning_row = self.leaderboard_data.iloc[0]
-            generate_html_report(self.leaderboard_data, winning_row, params_dict, roi_results, self.mprn, self.meter_serial, filepath)
+            
+            dual_results = evaluate_dual_tariffs(self.leaderboard_data, self.df_hdf, self.dual_params)
+            
+            generate_html_report(self.leaderboard_data, winning_row, params_dict, roi_results, dual_results, self.mprn, self.meter_serial, filepath)
             messagebox.showinfo("Success", f"HTML Audit Report generated successfully:\n{os.path.basename(filepath)}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to generate HTML report:\n{str(e)}")

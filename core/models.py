@@ -52,6 +52,33 @@ class FinancialROIParams:
         return max(0.0, (self.battery_capex + self.inverter_capex) - self.grant_amount)
 
 
+@dataclass
+class DualTariffParams:
+    exit_fee_per_switch: float = 50.0  # Early contract termination fee per switch
+    num_switches_per_year: int = 2     # Spring & Autumn switches
+    winter_months: List[int] = field(default_factory=lambda: [11, 12, 1, 2, 3])  # Nov - Mar (5 months)
+    summer_months: List[int] = field(default_factory=lambda: [4, 5, 6, 7, 8, 9, 10]) # Apr - Oct (7 months)
+
+    @property
+    def total_annual_fees(self) -> float:
+        return self.exit_fee_per_switch * self.num_switches_per_year
+
+
+@dataclass
+class DualTariffResult:
+    winter_supplier: str
+    winter_tariff: str
+    winter_strategy: str
+    winter_cost: float
+    summer_supplier: str
+    summer_tariff: str
+    summer_strategy: str
+    summer_cost: float
+    total_exit_fees: float
+    net_annual_bill: float
+    extra_savings_vs_single_best: float
+
+
 class FinancialROICalculator:
     """Calculates financial metrics: Simple Payback, 10-Year Cumulative Savings, ROI %, and NPV."""
     
