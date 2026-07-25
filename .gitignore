@@ -6,6 +6,10 @@ __pycache__/
 venv/
 env/
 
+# Scratch & Temporary Output Files
+scratch/
+*.html
+
 # Large/Raw Data Files
 *.xlsx
 *.csv
