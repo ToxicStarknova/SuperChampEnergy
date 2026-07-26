@@ -20,6 +20,7 @@ from core.report_generator import generate_html_report
 from ui.components import ToolTip, CustomTariffDialog, FinancialROIDialog
 from ui.charts import ChartManager, HAS_MATPLOTLIB
 from ui.dual_tariff_dialog import DualTariffDialog
+from ui.hardware_matrix_dialog import HardwareMatrixDialog
 
 if HAS_MATPLOTLIB:
     from matplotlib.figure import Figure
@@ -31,17 +32,20 @@ class HomeBatteryCalculatorApp:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("Home Battery & Tariff Optimization Tool - V2.5 Professional")
-        self.root.geometry("1720x940")
+        self.root.title("SuperChamp Energy - Home Battery & Tariff Optimizer (V2.5)")
+        self.root.geometry("1480x920")
         self.root.minsize(1400, 820)
         
-        self.hdf_path = tk.StringVar()
-        self.tariff_path = tk.StringVar()
+        self.hdf_path = tk.StringVar(value="HDF_calckWh_SAMPLE_23-06-2025.csv")
+        self.tariff_path = tk.StringVar(value="energypal tarriffs 03072026.csv")
         self.dam_path = tk.StringVar()
         self.dynamic_adders_path = tk.StringVar()
         
         self.leaderboard_data = None
         self.df_hdf = None 
+        self.valid_tariffs = None
+        self.dynamic_suppliers = []
+        self.dam_prices_c_kwh = None
         self.unique_dates = []
         self.current_date_idx = 0
         self.detailed_results = {}
@@ -79,6 +83,9 @@ class HomeBatteryCalculatorApp:
 
         ctk.CTkButton(header_frame, text="🔀 Dual-Tariff Analysis", width=150, fg_color="transparent", border_width=1,
                       text_color=("#0284c7", "#38bdf8"), command=self.open_dual_tariff_dialog).pack(side=tk.RIGHT, padx=4)
+
+        ctk.CTkButton(header_frame, text="⚡ Hardware Matrix", width=140, fg_color="transparent", border_width=1,
+                      text_color=("#8b5cf6", "#a78bfa"), command=self.open_hardware_matrix_dialog).pack(side=tk.RIGHT, padx=4)
         
         ctk.CTkButton(header_frame, text="📄 Export HTML Report", width=150, fg_color="#10b981", hover_color="#059669",
                       command=self.export_html_report).pack(side=tk.RIGHT, padx=4)
@@ -486,6 +493,34 @@ class HomeBatteryCalculatorApp:
         dual_results = evaluate_dual_tariffs(self.leaderboard_data, self.df_hdf, self.dual_params)
         DualTariffDialog(self.root, dual_results, self.dual_params, recalculate)
 
+    def open_hardware_matrix_dialog(self):
+        if self.df_hdf is None or self.valid_tariffs is None or self.valid_tariffs.empty:
+            messagebox.showwarning("Warning", "No simulation results available. Please run an optimization sweep first.")
+            return
+
+        try:
+            params = SimulationParams(
+                capacity=float(self.entry_capacity.get()),
+                usable_pct=float(self.entry_usable_pct.get()),
+                charge_rate=float(self.entry_charge_rate.get()),
+                grid_efficiency=float(self.entry_grid_eff.get()),
+                solar_efficiency=float(self.entry_solar_eff.get()),
+                min_soc=float(self.entry_minsoc.get()),
+                max_soc=float(self.entry_maxsoc.get()),
+                mic=float(self.entry_mic.get()),
+                mec=float(self.entry_mec.get()),
+                region=self.combo_region.get().strip().lower()
+            )
+        except ValueError:
+            messagebox.showerror("Error", "Check numeric hardware parameters.")
+            return
+
+        dam_prices = self.dam_prices_c_kwh if self.dam_prices_c_kwh is not None else np.zeros(len(self.df_hdf))
+        HardwareMatrixDialog(
+            self.root, self.df_hdf, self.valid_tariffs, self.dynamic_suppliers,
+            dam_prices, params
+        )
+
     def start_sweep_thread(self):
         if not self.hdf_path.get() or (not self.tariff_path.get() and not self.custom_tariffs):
             messagebox.showerror("Error", "Please select an HDF file and a Tariff DB (or Custom Tariff).")
@@ -810,6 +845,9 @@ class HomeBatteryCalculatorApp:
             payload = {
                 'df_res': df_res,
                 'df_hdf': df_hdf,
+                'valid_tariffs': valid_tariffs,
+                'dynamic_suppliers': dynamic_suppliers,
+                'dam_prices_c_kwh': dam_prices_c_kwh,
                 'mprn': mprn_val,
                 'meter_serial': meter_val,
                 'detailed_results': detailed_results,
@@ -830,6 +868,9 @@ class HomeBatteryCalculatorApp:
     def on_sweep_finished(self, payload: Dict[str, Any]):
         df_res = payload['df_res']
         self.df_hdf = payload['df_hdf']
+        self.valid_tariffs = payload.get('valid_tariffs')
+        self.dynamic_suppliers = payload.get('dynamic_suppliers', [])
+        self.dam_prices_c_kwh = payload.get('dam_prices_c_kwh')
         self.mprn = payload['mprn']
         self.meter_serial = payload['meter_serial']
         self.detailed_results = payload['detailed_results']

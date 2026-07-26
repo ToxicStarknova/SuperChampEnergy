@@ -4,7 +4,7 @@ import pandas as pd
 from numba import njit
 from typing import Tuple, Dict, Any, List, Optional
 
-from core.models import SimulationParams, DualTariffParams, DualTariffResult
+from core.models import SimulationParams, DualTariffParams, DualTariffResult, HardwareExpansionParams, HardwareScenarioResult
 
 @njit
 def _calc_cost_with_overage(imports: np.ndarray, prices: np.ndarray, is_ev_window: np.ndarray, 
@@ -538,6 +538,261 @@ def warmup_engine():
     _ = _calc_ideal_daily_adaptive(dummy_matrix, dummy_matrix, dummy_matrix, dummy_matrix, dummy_matrix, dummy_int)
 
 
+from core.parsers import get_half_hourly_rates_for_row
+
+
+def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFrame, 
+                                   dynamic_suppliers: List[Dict[str, Any]], dam_prices_c_kwh: np.ndarray,
+                                   base_params: SimulationParams, expansion_params: HardwareExpansionParams) -> List[HardwareScenarioResult]:
+    """
+    Evaluates 30 hardware expansion scenarios (5 Battery Additions x 6 PV Scale Factors).
+    Returns a list of HardwareScenarioResult objects.
+    """
+    n_samples = len(df_hdf)
+    orig_imports = df_hdf['consumption'].values.astype(np.float64)
+    orig_exports = df_hdf['generation'].values.astype(np.float64)
+    hours_array = df_hdf.index.hour.values.astype(np.int64)
+    months_array = df_hdf.index.month.values.astype(np.int64)
+    dates_array = df_hdf.index.date
+    
+    _, day_ids = np.unique(dates_array, return_inverse=True)
+    day_ids = day_ids.astype(np.int64)
+    
+    unique_dates = np.unique(dates_array)
+    num_days = len(unique_dates)
+    scaling_factor = 365.0 / num_days if num_days > 0 else 1.0
+    
+    base_cap = float(base_params.usable_capacity_kwh)
+    min_soc_kwh = float(base_params.min_soc_kwh)
+    grid_rte = float(base_params.grid_rte_decimal)
+    solar_charge_eff = float(base_params.solar_charge_efficiency)
+    charge_rate = float(base_params.charge_rate)
+    mic = float(base_params.mic)
+    mec = float(base_params.mec)
+
+    battery_additions = [0.0, 5.0, 10.0, 15.0, 20.0]
+    pv_scale_factors = [1.0, 1.2, 1.4, 1.6, 1.8, 2.0]
+    
+    all_strategies = ['self-consumption', 'import-minimiser', 'export-maximiser', 'balanced-export-maximiser', 'import-minimiser-summer-pass']
+    
+    # Pre-parse tariff rates & static arrays once across all scenarios
+    fixed_tariff_data = []
+    for _, row in valid_tariffs.iterrows():
+        try: fit_rate = float(row['Fit unit']) / 100.0 if not pd.isna(row.get('Fit unit')) else 0.18
+        except (ValueError, TypeError): fit_rate = 0.18
+            
+        import_prices_arr, is_ev_window, ev_overage_rate, has_overage_penalty, _, _ = get_half_hourly_rates_for_row(row, df_hdf.index)
+        
+        first_day_prices = import_prices_arr[:48]
+        min_p = np.min(first_day_prices)
+        fc_24 = np.zeros(24, dtype=np.bool_)
+        for h in range(24):
+            if first_day_prices[h*2] <= min_p + 0.001 or first_day_prices[h*2+1] <= min_p + 0.001:
+                fc_24[h] = True
+                
+        try: fixed_charges = float(row['Standing charge']) + float(row.get('PSO Levy', 0))
+        except (ValueError, TypeError): fixed_charges = 300.0
+            
+        cash_bonus = float(row.get('Cash bonus', 0.0)) if not pd.isna(row.get('Cash bonus')) else 0.0
+        
+        fixed_tariff_data.append({
+            'supplier': row['Supplier'], 'tariff': row['Tariff name'],
+            'fit_rate': fit_rate, 'import_prices_arr': import_prices_arr,
+            'is_ev_window': is_ev_window, 'ev_overage_rate': ev_overage_rate,
+            'has_overage_penalty': has_overage_penalty, 'fc_24': fc_24,
+            'fixed_charges': fixed_charges, 'cash_bonus': cash_bonus
+        })
+        
+    dynamic_tariff_data = []
+    for dyn in dynamic_suppliers:
+        if isinstance(dyn['Fit unit'], str) and dyn['Fit unit'].upper() == "DAM":
+            fit_rate_arr = dam_prices_c_kwh.copy() / 100.0
+            fit_payment_time = dyn.get('FIT Payment time', '')
+            if fit_payment_time:
+                match = re.search(r'fit_(\d+)_(\d+)', fit_payment_time)
+                if match:
+                    start_h, end_h = int(match.group(1)), int(match.group(2))
+                    fit_window = (hours_array >= start_h) & (hours_array < end_h)
+                    fit_rate_arr = np.where(fit_window, fit_rate_arr, 0.0)
+        else:
+            try: fit_rate_arr = np.full(n_samples, float(dyn['Fit unit']) / 100.0, dtype=np.float64)
+            except ValueError: fit_rate_arr = np.full(n_samples, 0.18, dtype=np.float64)
+            
+        fixed_charges = dyn['Standing charge'] * 1.09  
+        cash_bonus = dyn.get('Cash bonus', 0.0)
+        
+        prices = dam_prices_c_kwh.copy()
+        is_night_mask = (hours_array >= 23) | (hours_array < 8)
+        is_peak_mask = (hours_array >= 17) & (hours_array < 19)
+        is_day_mask = ~(is_night_mask | is_peak_mask)
+        prices[is_night_mask] += dyn['Night']
+        prices[is_day_mask] += dyn['Day']
+        prices[is_peak_mask] += dyn['Peak']
+        import_prices_arr = (prices / 100.0) * 1.09
+        
+        dynamic_tariff_data.append({
+            'supplier': dyn['Supplier'], 'tariff': dyn['Tariff name'],
+            'fit_rate_arr': fit_rate_arr, 'import_prices_arr': import_prices_arr,
+            'fixed_charges': fixed_charges, 'cash_bonus': cash_bonus
+        })
+        
+    costs_matrix = np.zeros((5, n_samples), dtype=np.float64)
+    exp_rev_matrix = np.zeros((5, n_samples), dtype=np.float64)
+    imports_matrix = np.zeros((5, n_samples), dtype=np.float64)
+    exports_matrix = np.zeros((5, n_samples), dtype=np.float64)
+    soc_matrix = np.zeros((5, n_samples), dtype=np.float64)
+
+    raw_results = []
+    baseline_bill = 0.0
+
+    for batt_add in battery_additions:
+        usable_cap = base_cap + batt_add
+        max_soc = usable_cap # 100% SoC upper bound
+        
+        for pv_scale in pv_scale_factors:
+            scaled_exports = orig_exports * pv_scale
+            
+            best_scenario_bill = 1e9
+            best_supplier = ""
+            best_tariff = ""
+            best_strategy = ""
+            
+            # Evaluate Fixed Tariffs
+            for ft in fixed_tariff_data:
+                for strat_idx in range(5):
+                    imp, exp, soc, _ = _run_simulation_from_arrays(
+                        orig_imports, scaled_exports, hours_array, months_array,
+                        ft['import_prices_arr'], ft['fit_rate'], ft['fc_24'], strat_idx,
+                        usable_cap, min_soc_kwh, max_soc, grid_rte, solar_charge_eff,
+                        charge_rate, mic, mec
+                    )
+                    costs, _ = _calc_cost_with_overage(
+                        imp, ft['import_prices_arr'], ft['is_ev_window'], ft['ev_overage_rate'], months_array, ft['has_overage_penalty']
+                    )
+                    exp_rev = exp * ft['fit_rate']
+                    costs_matrix[strat_idx, :] = costs
+                    exp_rev_matrix[strat_idx, :] = exp_rev
+                    imports_matrix[strat_idx, :] = imp
+                    exports_matrix[strat_idx, :] = exp
+                    soc_matrix[strat_idx, :] = soc
+                    
+                    bill = (np.sum(costs) - np.sum(exp_rev)) * scaling_factor + ft['fixed_charges'] - ft['cash_bonus']
+                    if bill < best_scenario_bill:
+                        best_scenario_bill = bill
+                        best_supplier = ft['supplier']
+                        best_tariff = ft['tariff']
+                        best_strategy = all_strategies[strat_idx]
+                        
+                # Ideal Daily Adaptive
+                _, _, _, ideal_costs, ideal_exp_rev, _ = _calc_ideal_daily_adaptive(
+                    costs_matrix, exp_rev_matrix, imports_matrix, exports_matrix, soc_matrix, day_ids
+                )
+                ideal_bill = (np.sum(ideal_costs) - np.sum(ideal_exp_rev)) * scaling_factor + ft['fixed_charges'] - ft['cash_bonus']
+                if ideal_bill < best_scenario_bill:
+                    best_scenario_bill = ideal_bill
+                    best_supplier = ft['supplier']
+                    best_tariff = ft['tariff']
+                    best_strategy = "Ideal Daily Adaptive"
+
+            # Evaluate Dynamic Tariffs
+            for dt in dynamic_tariff_data:
+                for strat_idx in range(5):
+                    imp, exp, soc, _ = _run_dynamic_simulation_from_arrays(
+                        orig_imports, scaled_exports, hours_array, months_array, day_ids,
+                        dt['import_prices_arr'], dt['fit_rate_arr'], strat_idx,
+                        usable_cap, min_soc_kwh, max_soc, grid_rte, solar_charge_eff,
+                        charge_rate, mic, mec
+                    )
+                    costs, _ = _calc_cost_with_overage(
+                        imp, dt['import_prices_arr'], np.zeros(n_samples, dtype=np.bool_), 0.0, months_array, False
+                    )
+                    exp_rev = exp * dt['fit_rate_arr']
+                    costs_matrix[strat_idx, :] = costs
+                    exp_rev_matrix[strat_idx, :] = exp_rev
+                    imports_matrix[strat_idx, :] = imp
+                    exports_matrix[strat_idx, :] = exp
+                    soc_matrix[strat_idx, :] = soc
+                    
+                    bill = (np.sum(costs) - np.sum(exp_rev)) * scaling_factor + dt['fixed_charges'] - dt['cash_bonus']
+                    if bill < best_scenario_bill:
+                        best_scenario_bill = bill
+                        best_supplier = dt['supplier']
+                        best_tariff = dt['tariff']
+                        best_strategy = all_strategies[strat_idx]
+                        
+                # Ideal Daily Adaptive
+                _, _, _, ideal_costs, ideal_exp_rev, _ = _calc_ideal_daily_adaptive(
+                    costs_matrix, exp_rev_matrix, imports_matrix, exports_matrix, soc_matrix, day_ids
+                )
+                ideal_bill = (np.sum(ideal_costs) - np.sum(ideal_exp_rev)) * scaling_factor + dt['fixed_charges'] - dt['cash_bonus']
+                if ideal_bill < best_scenario_bill:
+                    best_scenario_bill = ideal_bill
+                    best_supplier = dt['supplier']
+                    best_tariff = dt['tariff']
+                    best_strategy = "Ideal Daily Adaptive"
+
+            is_base = (batt_add == 0.0 and pv_scale == 1.0)
+            if is_base:
+                baseline_bill = best_scenario_bill
+
+            raw_results.append({
+                'batt_add': batt_add,
+                'pv_scale': pv_scale,
+                'total_cap': usable_cap,
+                'supplier': best_supplier,
+                'tariff': best_tariff,
+                'strategy': best_strategy,
+                'bill': best_scenario_bill,
+                'is_base': is_base
+            })
+
+    # Financial post-processing for all 30 scenarios
+    final_results = []
+    best_payback = 999.0
+    sweet_spot_idx = -1
+
+    for idx, r in enumerate(raw_results):
+        batt_add = r['batt_add']
+        pv_scale = r['pv_scale']
+        pv_add_kwp = (pv_scale - 1.0) * expansion_params.baseline_pv_kwp
+        
+        capex = (batt_add * expansion_params.battery_cost_per_kwh) + (pv_add_kwp * expansion_params.pv_cost_per_kwp)
+        savings = max(0.0, baseline_bill - r['bill'])
+        
+        if r['is_base']:
+            payback = 0.0
+        elif savings > 0.01:
+            payback = capex / savings
+        else:
+            payback = 999.0
+            
+        if not r['is_base'] and savings > 0 and payback < best_payback:
+            best_payback = payback
+            sweet_spot_idx = idx
+
+        final_results.append(HardwareScenarioResult(
+            battery_addition_kwh=batt_add,
+            pv_scale_factor=pv_scale,
+            pv_addition_kwp=round(pv_add_kwp, 2),
+            total_battery_capacity_kwh=r['total_cap'],
+            winning_supplier=r['supplier'],
+            winning_tariff=r['tariff'],
+            winning_strategy=r['strategy'].replace('-', ' ').title(),
+            annual_bill=round(r['bill'], 2),
+            incremental_savings=round(savings, 2),
+            expansion_capex=round(capex, 2),
+            simple_payback_years=round(payback, 1) if payback < 900 else 99.0,
+            is_sweet_spot=False,
+            is_baseline=r['is_base']
+        ))
+
+    if sweet_spot_idx >= 0:
+        final_results[sweet_spot_idx].is_sweet_spot = True
+
+    return final_results
+
+
 # Automatically pre-compile Numba kernels on module load
 warmup_engine()
+
 

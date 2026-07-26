@@ -123,3 +123,30 @@ class FinancialROICalculator:
             'npv': round(npv, 2),
             'yearly_cash_flows': [round(cf, 2) for cf in yearly_cash_flows]
         }
+
+
+@dataclass
+class HardwareExpansionParams:
+    """Parameters for CapEx inputs and baseline hardware for sensitivity matrix evaluation."""
+    battery_cost_per_kwh: float = 300.0
+    pv_cost_per_kwp: float = 900.0
+    baseline_pv_kwp: float = 6.1
+
+
+@dataclass
+class HardwareScenarioResult:
+    """Stores simulation & financial evaluation results for a single hardware expansion scenario."""
+    battery_addition_kwh: float
+    pv_scale_factor: float
+    pv_addition_kwp: float
+    total_battery_capacity_kwh: float
+    winning_supplier: str
+    winning_tariff: str
+    winning_strategy: str
+    annual_bill: float
+    incremental_savings: float
+    expansion_capex: float
+    simple_payback_years: float
+    is_sweet_spot: bool = False
+    is_baseline: bool = False
+
