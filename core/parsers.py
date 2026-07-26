@@ -175,37 +175,36 @@ def get_half_hourly_rates_for_row(row: pd.Series, date_range: pd.DatetimeIndex) 
                         ev_hours.update(range(start_h, 24))
                         ev_hours.update(range(0, end_h))
 
-    prices = []
-    is_ev_window = []
+    hour_array = date_range.hour.values
+    is_weekend_array = (date_range.weekday.values >= 5)
+    is_night_mask = (hour_array >= 23) | (hour_array < 8)
+    is_peak_mask = (hour_array >= 17) & (hour_array < 19)
+
+    prices_arr = np.full(len(date_range), day_rate, dtype=np.float64)
+    is_ev_window = np.zeros(len(date_range), dtype=np.bool_)
     
-    for dt in date_range:
-        hour, is_weekend = dt.hour, dt.weekday() >= 5
-        in_ev = False
-        
-        if plan_type == '24h': 
-            prices.append(day_rate)
-        elif plan_type == 'day/night':
-            prices.append(night_rate if hour >= 23 or hour < 8 else day_rate)
-        elif plan_type == 'smart':
-            if hour in ev_hours and ev_rate is not None: 
-                prices.append(ev_rate)
-                in_ev = True
-            elif hour >= 23 or hour < 8: 
-                prices.append(night_rate)
-            elif 17 <= hour < 19:
-                prices.append(day_rate if is_weekend and "no_peak_weekend" in extra_tags else peak_rate)
-            else: 
-                prices.append(day_rate)
+    if plan_type == 'day/night':
+        prices_arr[is_night_mask] = night_rate
+    elif plan_type == 'smart':
+        prices_arr[is_night_mask] = night_rate
+        if "no_peak_weekend" in extra_tags:
+            peak_cond = is_peak_mask & (~is_weekend_array)
         else:
-            prices.append(day_rate)
+            peak_cond = is_peak_mask
+        prices_arr[peak_cond] = peak_rate
+        
+        if ev_rate is not None and len(ev_hours) > 0:
+            ev_mask = np.zeros(len(date_range), dtype=np.bool_)
+            for h in ev_hours:
+                ev_mask |= (hour_array == h)
+            prices_arr[ev_mask] = ev_rate
+            is_ev_window = ev_mask
             
-        is_ev_window.append(in_ev)
-            
-    if len(prices) == 0:
-        prices = [day_rate] * len(date_range)
+    if len(prices_arr) == 0:
+        prices_arr = np.full(len(date_range), day_rate, dtype=np.float64)
         has_unknown_type = True
         
-    return pd.Series(prices, index=date_range), np.array(is_ev_window, dtype=np.bool_), ev_overage_rate, has_overage_penalty, has_unknown_type, has_missing_rates
+    return prices_arr, is_ev_window, ev_overage_rate, has_overage_penalty, has_unknown_type, has_missing_rates
 
 
 def prepare_dam(hdf_idx: pd.DatetimeIndex, dam_file: str) -> np.ndarray:

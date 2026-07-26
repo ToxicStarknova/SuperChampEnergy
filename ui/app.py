@@ -14,7 +14,8 @@ from typing import Dict, Any, List, Optional
 from core.models import SimulationParams, FinancialROIParams, FinancialROICalculator, DualTariffParams, DualTariffResult
 from core.parsers import (parse_hdf, filter_last_12_full_months, normalize_tariff_dataframe, 
                           get_half_hourly_rates_for_row, prepare_dam, parse_dynamic_suppliers, MONTH_NAMES)
-from core.engine import run_simulation, run_dynamic_simulation, _calc_cost_with_overage, evaluate_dual_tariffs
+from core.engine import (run_simulation, run_dynamic_simulation, _calc_cost_with_overage, evaluate_dual_tariffs,
+                         _run_simulation_from_arrays, _run_dynamic_simulation_from_arrays, _calc_ideal_daily_adaptive)
 from core.report_generator import generate_html_report
 from ui.components import ToolTip, CustomTariffDialog, FinancialROIDialog
 from ui.charts import ChartManager, HAS_MATPLOTLIB
@@ -545,18 +546,42 @@ class HomeBatteryCalculatorApp:
             if num_tariffs == 0:
                 raise ValueError("No tariffs found matching the selected region and criteria.")
             
-            orig_imports = df_hdf['consumption'].values
-            orig_exports = df_hdf['generation'].values
-            months_array = df_hdf.index.month.values
+            n_samples = len(df_hdf)
+            orig_imports = df_hdf['consumption'].values.astype(np.float64)
+            orig_exports = df_hdf['generation'].values.astype(np.float64)
+            hours_array = df_hdf.index.hour.values.astype(np.int64)
+            months_array = df_hdf.index.month.values.astype(np.int64)
             dates_array = df_hdf.index.date
-            mask_june, mask_dec = (months_array == 6), (months_array == 12)
+            
+            _, day_ids = np.unique(dates_array, return_inverse=True)
+            day_ids = day_ids.astype(np.int64)
+            
+            usable_cap_kwh = float(params.usable_capacity_kwh)
+            min_soc_kwh = float(params.min_soc_kwh)
+            max_soc_kwh = float(params.max_soc_kwh)
+            grid_rte = float(params.grid_rte_decimal)
+            solar_charge_eff = float(params.solar_charge_efficiency)
+            charge_rate = float(params.charge_rate)
+            mic = float(params.mic)
+            mec = float(params.mec)
 
+            mask_june, mask_dec = (months_array == 6), (months_array == 12)
             unique_dates = np.unique(dates_array)
             num_days = len(unique_dates)
             scaling_factor = 365.0 / num_days if num_days > 0 else 1.0
             is_short_duration = num_days < 330
             exceeded_plans = []
             all_strategies = ['self-consumption', 'import-minimiser', 'export-maximiser', 'balanced-export-maximiser', 'import-minimiser-summer-pass']
+            
+            days_june = max(1, np.sum(mask_june) // 48)
+            days_dec = max(1, np.sum(mask_dec) // 48)
+
+            # Pre-allocate 2D buffers (5 x N) for strategy outputs per tariff
+            costs_matrix = np.zeros((5, n_samples), dtype=np.float64)
+            exp_rev_matrix = np.zeros((5, n_samples), dtype=np.float64)
+            imports_matrix = np.zeros((5, n_samples), dtype=np.float64)
+            exports_matrix = np.zeros((5, n_samples), dtype=np.float64)
+            soc_matrix = np.zeros((5, n_samples), dtype=np.float64)
 
             # 1. Standard Fixed Sweep Track
             for _, row in valid_tariffs.iterrows():
@@ -567,42 +592,39 @@ class HomeBatteryCalculatorApp:
                     fit_rate = 0.18
                     has_missing_fit = True
                     
-                import_prices, is_ev_window, ev_overage_rate, has_overage_penalty, has_unknown_type, has_missing_rates = get_half_hourly_rates_for_row(row, df_hdf.index)
+                import_prices_arr, is_ev_window, ev_overage_rate, has_overage_penalty, has_unknown_type, has_missing_rates = get_half_hourly_rates_for_row(row, df_hdf.index)
                 if has_missing_fit: has_missing_rates = True
                     
                 tariff_label = row['Tariff name']
                 if has_unknown_type: tariff_label += " [Unknown Plan Type]"
                 elif has_missing_rates: tariff_label += " [Missing Rates]"
                     
-                first_day_prices = import_prices.iloc[:48]
-                hourly_prices = first_day_prices.groupby(first_day_prices.index.hour).first()
-                force_charge_hours = [hourly_prices.get(h, 99.0) <= hourly_prices.min() + 0.001 for h in range(24)]
+                first_day_prices = import_prices_arr[:48]
+                min_p = np.min(first_day_prices)
+                force_charge_hours_24 = np.zeros(24, dtype=np.bool_)
+                for h in range(24):
+                    if first_day_prices[h*2] <= min_p + 0.001 or first_day_prices[h*2+1] <= min_p + 0.001:
+                        force_charge_hours_24[h] = True
                 
                 tid = f"T_{int_id}"; int_id += 1
                 detailed_results[tid] = {'meta': row.to_dict()}
                 
-                try:
-                    fixed_charges = float(row['Standing charge']) + float(row.get('PSO Levy', 0))
-                except (ValueError, TypeError):
-                    fixed_charges = 300.0
-                    has_missing_rates = True
+                try: fixed_charges = float(row['Standing charge']) + float(row.get('PSO Levy', 0))
+                except (ValueError, TypeError): fixed_charges = 300.0; has_missing_rates = True
                     
                 cash_bonus = float(row.get('Cash bonus', 0.0)) if not pd.isna(row.get('Cash bonus')) else 0.0
                 monthly_fixed = fixed_charges / 12.0
 
-                baseline_import_costs, base_limit_exceeded = _calc_cost_with_overage(orig_imports, import_prices.values, is_ev_window, ev_overage_rate, months_array, has_overage_penalty)
+                baseline_import_costs, base_limit_exceeded = _calc_cost_with_overage(orig_imports, import_prices_arr, is_ev_window, ev_overage_rate, months_array, has_overage_penalty)
                 annual_imp_base = np.sum(baseline_import_costs)
                 annual_exp_base = np.sum(orig_exports * fit_rate)
                 net_bill_base = (annual_imp_base - annual_exp_base) * scaling_factor + fixed_charges - cash_bonus
                 
                 base_imp_kwh, base_exp_kwh = np.sum(orig_imports), np.sum(orig_exports)
-                
-                days_june = max(1, np.sum(mask_june) // 48)
-                days_dec = max(1, np.sum(mask_dec) // 48)
                 base_june = (np.sum(baseline_import_costs[mask_june]) - np.sum(orig_exports[mask_june] * fit_rate)) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
                 base_dec = (np.sum(baseline_import_costs[mask_dec]) - np.sum(orig_exports[mask_dec] * fit_rate)) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
                 
-                detailed_results[tid]['baseline-no-battery'] = {'import': orig_imports, 'export': orig_exports, 'soc': np.zeros(len(orig_imports))}
+                detailed_results[tid]['baseline-no-battery'] = {'import': orig_imports, 'export': orig_exports, 'soc': np.zeros(n_samples)}
                 results.append({
                     'Supplier': row['Supplier'], 'Tariff': tariff_label, 'Strategy': 'baseline-no-battery', 
                     'Arbitrage': "Check Data" if (has_unknown_type or has_missing_rates) else "N/A", 'Imp_kWh': base_imp_kwh, 'Exp_kWh': base_exp_kwh,
@@ -611,29 +633,34 @@ class HomeBatteryCalculatorApp:
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': False
                 })
 
-                # Track daily strategy outputs for ideal adaptive calculation
-                daily_strat_sims = {}
-
-                for strategy in all_strategies:
-                    imports, exports, soc, is_arb = run_simulation(df_hdf, import_prices, fit_rate, strategy, force_charge_hours, params)
+                for strat_idx in range(5):
+                    strategy = all_strategies[strat_idx]
+                    imports, exports, soc, is_arb = _run_simulation_from_arrays(
+                        orig_imports, orig_exports, hours_array, months_array,
+                        import_prices_arr, fit_rate, force_charge_hours_24, strat_idx,
+                        usable_cap_kwh, min_soc_kwh, max_soc_kwh, grid_rte, solar_charge_eff,
+                        charge_rate, mic, mec
+                    )
                     detailed_results[tid][strategy] = {'import': imports, 'export': exports, 'soc': soc}
                     
-                    strategy_import_costs, strat_limit_exceeded = _calc_cost_with_overage(imports, import_prices.values, is_ev_window, ev_overage_rate, months_array, has_overage_penalty)
+                    strategy_import_costs, strat_limit_exceeded = _calc_cost_with_overage(imports, import_prices_arr, is_ev_window, ev_overage_rate, months_array, has_overage_penalty)
                     if strat_limit_exceeded:
                         exceeded_plans.append(f"{row['Supplier']} {row['Tariff name']} ({strategy})")
                         
-                    daily_strat_sims[strategy] = {
-                        'imports': imports, 'exports': exports, 'soc': soc, 
-                        'costs': strategy_import_costs, 'exp_rev': exports * fit_rate
-                    }
+                    exp_rev = exports * fit_rate
+                    costs_matrix[strat_idx, :] = strategy_import_costs
+                    exp_rev_matrix[strat_idx, :] = exp_rev
+                    imports_matrix[strat_idx, :] = imports
+                    exports_matrix[strat_idx, :] = exports
+                    soc_matrix[strat_idx, :] = soc
                     
                     annual_imp_cost = np.sum(strategy_import_costs)
-                    annual_exp_rev = np.sum(exports * fit_rate)
+                    annual_exp_rev = np.sum(exp_rev)
                     net_bill = (annual_imp_cost - annual_exp_rev) * scaling_factor + fixed_charges - cash_bonus
                     
                     strat_imp_kwh, strat_exp_kwh = np.sum(imports), np.sum(exports)
-                    strat_june = (np.sum(strategy_import_costs[mask_june]) - np.sum(exports[mask_june] * fit_rate)) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
-                    strat_dec = (np.sum(strategy_import_costs[mask_dec]) - np.sum(exports[mask_dec] * fit_rate)) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+                    strat_june = (np.sum(strategy_import_costs[mask_june]) - np.sum(exp_rev[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
+                    strat_dec = (np.sum(strategy_import_costs[mask_dec]) - np.sum(exp_rev[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
                     
                     arb_display = f"{is_arb:.2f} c/kWh" if (strategy not in ['baseline-no-battery', 'self-consumption'] and is_arb is not None and is_arb > 0) else "N/A"
                             
@@ -645,32 +672,11 @@ class HomeBatteryCalculatorApp:
                         'Bill': net_bill, '_id': tid, 'is_dynamic': False
                     })
 
-                # --- IDEAL DAILY ADAPTIVE STRATEGY (ORACLE EMS) ---
-                ideal_imp = np.zeros(len(df_hdf))
-                ideal_exp = np.zeros(len(df_hdf))
-                ideal_soc = np.zeros(len(df_hdf))
-                ideal_costs = np.zeros(len(df_hdf))
-                ideal_exp_rev = np.zeros(len(df_hdf))
-                strategy_win_counts = {s: 0 for s in all_strategies}
-
-                for dt in unique_dates:
-                    dt_mask = (dates_array == dt)
-                    best_day_cost = 999999.0
-                    best_strat_key = all_strategies[0]
-                    
-                    for strat in all_strategies:
-                        day_net_cost = np.sum(daily_strat_sims[strat]['costs'][dt_mask]) - np.sum(daily_strat_sims[strat]['exp_rev'][dt_mask])
-                        if day_net_cost < best_day_cost:
-                            best_day_cost = day_net_cost
-                            best_strat_key = strat
-                            
-                    strategy_win_counts[best_strat_key] += 1
-                    ideal_imp[dt_mask] = daily_strat_sims[best_strat_key]['imports'][dt_mask]
-                    ideal_exp[dt_mask] = daily_strat_sims[best_strat_key]['exports'][dt_mask]
-                    ideal_soc[dt_mask] = daily_strat_sims[best_strat_key]['soc'][dt_mask]
-                    ideal_costs[dt_mask] = daily_strat_sims[best_strat_key]['costs'][dt_mask]
-                    ideal_exp_rev[dt_mask] = daily_strat_sims[best_strat_key]['exp_rev'][dt_mask]
-
+                # --- IDEAL DAILY ADAPTIVE STRATEGY (PURE NUMBA JIT) ---
+                ideal_imp, ideal_exp, ideal_soc, ideal_costs, ideal_exp_rev, win_counts = _calc_ideal_daily_adaptive(
+                    costs_matrix, exp_rev_matrix, imports_matrix, exports_matrix, soc_matrix, day_ids
+                )
+                strategy_win_counts = {all_strategies[i]: int(win_counts[i]) for i in range(5)}
                 detailed_results[tid]['ideal-daily-adaptive'] = {'import': ideal_imp, 'export': ideal_exp, 'soc': ideal_soc, 'win_counts': strategy_win_counts}
                 
                 annual_ideal_imp_cost = np.sum(ideal_costs)
@@ -691,46 +697,46 @@ class HomeBatteryCalculatorApp:
             # 2. Dynamic Tariff Sweep Track
             for dyn in dynamic_suppliers:
                 if isinstance(dyn['Fit unit'], str) and dyn['Fit unit'].upper() == "DAM":
-                    fit_rate = dam_prices_c_kwh.copy() / 100.0
+                    fit_rate_arr = dam_prices_c_kwh.copy() / 100.0
                     fit_payment_time = dyn.get('FIT Payment time', '')
                     if fit_payment_time:
                         match = re.search(r'fit_(\d+)_(\d+)', fit_payment_time)
                         if match:
                             start_h, end_h = int(match.group(1)), int(match.group(2))
-                            hour_series = df_hdf.index.hour
-                            fit_window = (hour_series >= start_h) & (hour_series < end_h)
-                            fit_rate = np.where(fit_window, fit_rate, 0.0)
+                            fit_window = (hours_array >= start_h) & (hours_array < end_h)
+                            fit_rate_arr = np.where(fit_window, fit_rate_arr, 0.0)
                 else:
-                    try: fit_rate = np.full(len(df_hdf), float(dyn['Fit unit']) / 100.0)
-                    except ValueError: fit_rate = np.full(len(df_hdf), 0.18)
+                    try: fit_rate_arr = np.full(n_samples, float(dyn['Fit unit']) / 100.0, dtype=np.float64)
+                    except ValueError: fit_rate_arr = np.full(n_samples, 0.18, dtype=np.float64)
                     
                 fixed_charges = dyn['Standing charge'] * 1.09  
                 cash_bonus = dyn.get('Cash bonus', 0.0)
                 monthly_fixed = fixed_charges / 12.0
                 
                 prices = dam_prices_c_kwh.copy()
-                hour = df_hdf.index.hour
-                is_night = (hour >= 23) | (hour < 8); is_peak = (hour >= 17) & (hour < 19); is_day = ~(is_night | is_peak)
-                prices[is_night] += dyn['Night']; prices[is_day] += dyn['Day']; prices[is_peak] += dyn['Peak']
-                import_prices = pd.Series(prices / 100.0, index=df_hdf.index) * 1.09
+                is_night_mask = (hours_array >= 23) | (hours_array < 8)
+                is_peak_mask = (hours_array >= 17) & (hours_array < 19)
+                is_day_mask = ~(is_night_mask | is_peak_mask)
+                prices[is_night_mask] += dyn['Night']
+                prices[is_day_mask] += dyn['Day']
+                prices[is_peak_mask] += dyn['Peak']
+                import_prices_arr = (prices / 100.0) * 1.09
                 
-                dyn_is_ev_window = np.zeros(len(df_hdf), dtype=np.bool_)
+                dyn_is_ev_window = np.zeros(n_samples, dtype=np.bool_)
                 dyn_ev_overage_rate = 0.0
                 tid = f"T_{int_id}"; int_id += 1
                 detailed_results[tid] = {'meta': dyn}
                 
-                baseline_import_costs, base_limit_exceeded = _calc_cost_with_overage(orig_imports, import_prices.values, dyn_is_ev_window, dyn_ev_overage_rate, months_array, False)
+                baseline_import_costs, base_limit_exceeded = _calc_cost_with_overage(orig_imports, import_prices_arr, dyn_is_ev_window, dyn_ev_overage_rate, months_array, False)
                 annual_imp_base = np.sum(baseline_import_costs)
-                annual_exp_base = np.sum(orig_exports * fit_rate)
+                annual_exp_base = np.sum(orig_exports * fit_rate_arr)
                 net_bill_base = (annual_imp_base - annual_exp_base) * scaling_factor + fixed_charges - cash_bonus
                 
                 base_imp_kwh, base_exp_kwh = np.sum(orig_imports), np.sum(orig_exports)
-                days_june = max(1, np.sum(mask_june) // 48)
-                days_dec = max(1, np.sum(mask_dec) // 48)
-                base_june = (np.sum(baseline_import_costs[mask_june]) - np.sum(orig_exports[mask_june] * fit_rate[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
-                base_dec = (np.sum(baseline_import_costs[mask_dec]) - np.sum(orig_exports[mask_dec] * fit_rate[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+                base_june = (np.sum(baseline_import_costs[mask_june]) - np.sum(orig_exports[mask_june] * fit_rate_arr[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
+                base_dec = (np.sum(baseline_import_costs[mask_dec]) - np.sum(orig_exports[mask_dec] * fit_rate_arr[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
                 
-                detailed_results[tid]['baseline-no-battery'] = {'import': orig_imports, 'export': orig_exports, 'soc': np.zeros(len(orig_imports))}
+                detailed_results[tid]['baseline-no-battery'] = {'import': orig_imports, 'export': orig_exports, 'soc': np.zeros(n_samples)}
                 results.append({
                     'Supplier': dyn['Supplier'], 'Tariff': dyn['Tariff name'], 'Strategy': 'baseline-no-battery', 
                     'Arbitrage': "N/A", 'Imp_kWh': base_imp_kwh, 'Exp_kWh': base_exp_kwh,
@@ -739,26 +745,32 @@ class HomeBatteryCalculatorApp:
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': True
                 })
 
-                daily_strat_sims = {}
-
-                for strategy in all_strategies:
-                    imports, exports, soc, is_arb = run_dynamic_simulation(df_hdf, import_prices, fit_rate, strategy, params)
+                for strat_idx in range(5):
+                    strategy = all_strategies[strat_idx]
+                    imports, exports, soc, is_arb = _run_dynamic_simulation_from_arrays(
+                        orig_imports, orig_exports, hours_array, months_array, day_ids,
+                        import_prices_arr, fit_rate_arr, strat_idx,
+                        usable_cap_kwh, min_soc_kwh, max_soc_kwh, grid_rte, solar_charge_eff,
+                        charge_rate, mic, mec
+                    )
                     detailed_results[tid][strategy] = {'import': imports, 'export': exports, 'soc': soc}
                     
-                    strategy_import_costs, strat_limit_exceeded = _calc_cost_with_overage(imports, import_prices.values, dyn_is_ev_window, dyn_ev_overage_rate, months_array, False)
+                    strategy_import_costs, strat_limit_exceeded = _calc_cost_with_overage(imports, import_prices_arr, dyn_is_ev_window, dyn_ev_overage_rate, months_array, False)
                     
-                    daily_strat_sims[strategy] = {
-                        'imports': imports, 'exports': exports, 'soc': soc, 
-                        'costs': strategy_import_costs, 'exp_rev': exports * fit_rate
-                    }
+                    exp_rev = exports * fit_rate_arr
+                    costs_matrix[strat_idx, :] = strategy_import_costs
+                    exp_rev_matrix[strat_idx, :] = exp_rev
+                    imports_matrix[strat_idx, :] = imports
+                    exports_matrix[strat_idx, :] = exports
+                    soc_matrix[strat_idx, :] = soc
 
                     annual_imp_cost = np.sum(strategy_import_costs)
-                    annual_exp_rev = np.sum(exports * fit_rate)
+                    annual_exp_rev = np.sum(exp_rev)
                     net_bill = (annual_imp_cost - annual_exp_rev) * scaling_factor + fixed_charges - cash_bonus
                     
                     strat_imp_kwh, strat_exp_kwh = np.sum(imports), np.sum(exports)
-                    strat_june = (np.sum(strategy_import_costs[mask_june]) - np.sum(exports[mask_june] * fit_rate[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
-                    strat_dec = (np.sum(strategy_import_costs[mask_dec]) - np.sum(exports[mask_dec] * fit_rate[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+                    strat_june = (np.sum(strategy_import_costs[mask_june]) - np.sum(exp_rev[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
+                    strat_dec = (np.sum(strategy_import_costs[mask_dec]) - np.sum(exp_rev[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
                     
                     arb_display = f"{is_arb:.2f} c/kWh" if (strategy not in ['baseline-no-battery', 'self-consumption'] and is_arb is not None and is_arb > 0) else "N/A"
                             
@@ -770,32 +782,11 @@ class HomeBatteryCalculatorApp:
                         'Bill': net_bill, '_id': tid, 'is_dynamic': True
                     })
 
-                # Ideal Daily Adaptive for Dynamic
-                ideal_imp = np.zeros(len(df_hdf))
-                ideal_exp = np.zeros(len(df_hdf))
-                ideal_soc = np.zeros(len(df_hdf))
-                ideal_costs = np.zeros(len(df_hdf))
-                ideal_exp_rev = np.zeros(len(df_hdf))
-                strategy_win_counts = {s: 0 for s in all_strategies}
-
-                for dt in unique_dates:
-                    dt_mask = (dates_array == dt)
-                    best_day_cost = 999999.0
-                    best_strat_key = all_strategies[0]
-                    
-                    for strat in all_strategies:
-                        day_net_cost = np.sum(daily_strat_sims[strat]['costs'][dt_mask]) - np.sum(daily_strat_sims[strat]['exp_rev'][dt_mask])
-                        if day_net_cost < best_day_cost:
-                            best_day_cost = day_net_cost
-                            best_strat_key = strat
-                            
-                    strategy_win_counts[best_strat_key] += 1
-                    ideal_imp[dt_mask] = daily_strat_sims[best_strat_key]['imports'][dt_mask]
-                    ideal_exp[dt_mask] = daily_strat_sims[best_strat_key]['exports'][dt_mask]
-                    ideal_soc[dt_mask] = daily_strat_sims[best_strat_key]['soc'][dt_mask]
-                    ideal_costs[dt_mask] = daily_strat_sims[best_strat_key]['costs'][dt_mask]
-                    ideal_exp_rev[dt_mask] = daily_strat_sims[best_strat_key]['exp_rev'][dt_mask]
-
+                # Ideal Daily Adaptive for Dynamic (Pure Numba JIT)
+                ideal_imp, ideal_exp, ideal_soc, ideal_costs, ideal_exp_rev, win_counts = _calc_ideal_daily_adaptive(
+                    costs_matrix, exp_rev_matrix, imports_matrix, exports_matrix, soc_matrix, day_ids
+                )
+                strategy_win_counts = {all_strategies[i]: int(win_counts[i]) for i in range(5)}
                 detailed_results[tid]['ideal-daily-adaptive'] = {'import': ideal_imp, 'export': ideal_exp, 'soc': ideal_soc, 'win_counts': strategy_win_counts}
                 
                 annual_ideal_imp_cost = np.sum(ideal_costs)

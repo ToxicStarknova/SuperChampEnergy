@@ -152,103 +152,219 @@ def _fast_simulate(consumptions: np.ndarray, generations: np.ndarray, hours: np.
     return grid_imports, grid_exports, soc_track
 
 
-def run_simulation(df_hdf: pd.DataFrame, import_prices: pd.Series, export_price: float, 
-                   strategy: str, force_charge_hours: List[bool], params: SimulationParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Runs battery simulation for fixed rate tariffs."""
-    usable_cap_kwh = params.usable_capacity_kwh
-    min_soc_kwh, max_soc_kwh = params.min_soc_kwh, params.max_soc_kwh
-    grid_rte = params.grid_rte_decimal
+STRATEGY_MAP = {
+    'self-consumption': 0, 
+    'import-minimiser': 1, 
+    'export-maximiser': 2, 
+    'balanced-export-maximiser': 3, 
+    'import-minimiser-summer-pass': 4
+}
+
+
+@njit(fastmath=True)
+def _run_simulation_from_arrays(consumption: np.ndarray, generation: np.ndarray, 
+                                hour_array: np.ndarray, month_array: np.ndarray,
+                                import_prices: np.ndarray, export_price: float, 
+                                force_charge_hours_24: np.ndarray, strategy_id: int, 
+                                usable_cap_kwh: float, min_soc_kwh: float, max_soc_kwh: float,
+                                grid_rte: float, solar_charge_efficiency: float,
+                                charge_rate: float, mic: float, mec: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Pure Numba JIT array-based kernel for fixed rate battery simulation."""
     grid_efficiency_sqrt = np.sqrt(grid_rte)
-    solar_charge_efficiency = params.solar_charge_efficiency
     
-    strategy_map = {
-        'self-consumption': 0, 
-        'import-minimiser': 1, 
-        'export-maximiser': 2, 
-        'balanced-export-maximiser': 3, 
-        'import-minimiser-summer-pass': 4
-    }
-    
-    hour_array = df_hdf.index.hour.values
-    force_charge_mask = np.array(force_charge_hours, dtype=np.bool_)[hour_array]
+    force_charge_mask = force_charge_hours_24[hour_array]
     
     pre_charge_hours = np.zeros(24, dtype=np.bool_)
-    if strategy in ['export-maximiser', 'balanced-export-maximiser']:
+    if strategy_id == 2 or strategy_id == 3:
         for h in range(24):
-            if force_charge_hours[h]:
+            if force_charge_hours_24[h]:
                 for offset in range(1, 5): 
                     pre_charge_hours[(h - offset) % 24] = True
     pre_charge_mask = pre_charge_hours[hour_array]
     
-    cheapest_import_rate = np.min(import_prices.values[force_charge_mask]) if np.any(force_charge_mask) else 99.0
+    cheapest_import_rate = 99.0
+    has_fc = False
+    for i in range(len(import_prices)):
+        if force_charge_mask[i]:
+            if not has_fc or import_prices[i] < cheapest_import_rate:
+                cheapest_import_rate = import_prices[i]
+                has_fc = True
+                
     arb_margin_c_kwh = ((export_price * grid_rte) - cheapest_import_rate) * 100.0
     is_arbitrage_profitable = arb_margin_c_kwh > 0
-    is_arbitrage_profitable_mask = np.full(len(df_hdf), is_arbitrage_profitable, dtype=np.bool_)
+    is_arbitrage_profitable_mask = np.full(len(consumption), is_arbitrage_profitable, dtype=np.bool_)
     
     grid_imports, grid_exports, soc_track = _fast_simulate(
-        df_hdf['consumption'].values, df_hdf['generation'].values, hour_array, df_hdf.index.month.values, 
+        consumption, generation, hour_array, month_array, 
         force_charge_mask, pre_charge_mask, is_arbitrage_profitable_mask, usable_cap_kwh, min_soc_kwh, max_soc_kwh, grid_rte, 
-        solar_charge_efficiency, grid_efficiency_sqrt, params.charge_rate, params.mic, params.mec, strategy_map.get(strategy, 0)
+        solar_charge_efficiency, grid_efficiency_sqrt, charge_rate, mic, mec, strategy_id
     )
+    return grid_imports, grid_exports, soc_track, arb_margin_c_kwh
+
+
+def run_simulation(df_hdf: pd.DataFrame, import_prices: pd.Series, export_price: float, 
+                   strategy: str, force_charge_hours: List[bool], params: SimulationParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Runs battery simulation for fixed rate tariffs."""
+    strategy_id = STRATEGY_MAP.get(strategy, 0)
+    fc_hours_arr = np.array(force_charge_hours, dtype=np.bool_)
+    imp_prices_arr = import_prices.values if isinstance(import_prices, pd.Series) else import_prices
+    
+    return _run_simulation_from_arrays(
+        df_hdf['consumption'].values.astype(np.float64), 
+        df_hdf['generation'].values.astype(np.float64),
+        df_hdf.index.hour.values.astype(np.int64), 
+        df_hdf.index.month.values.astype(np.int64),
+        imp_prices_arr.astype(np.float64), 
+        float(export_price), 
+        fc_hours_arr, 
+        int(strategy_id),
+        float(params.usable_capacity_kwh), 
+        float(params.min_soc_kwh), 
+        float(params.max_soc_kwh),
+        float(params.grid_rte_decimal), 
+        float(params.solar_charge_efficiency), 
+        float(params.charge_rate), 
+        float(params.mic), 
+        float(params.mec)
+    )
+
+
+@njit(fastmath=True)
+def _calc_dynamic_masks(import_prices: np.ndarray, export_prices: np.ndarray, 
+                        day_ids: np.ndarray, req_intervals: int, strategy_id: int, grid_rte: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Pure Numba helper for dynamic tariff mask generation."""
+    n = len(import_prices)
+    force_charge_mask = np.zeros(n, dtype=np.bool_)
+    pre_charge_mask = np.zeros(n, dtype=np.bool_)
+    is_arbitrage_profitable_mask = np.zeros(n, dtype=np.bool_)
+    
+    num_days = day_ids[-1] + 1 if n > 0 else 0
+    
+    start_idx = 0
+    for day in range(num_days):
+        end_idx = start_idx
+        while end_idx < n and day_ids[end_idx] == day:
+            end_idx += 1
+            
+        day_len = end_idx - start_idx
+        if day_len > 0:
+            day_prices = import_prices[start_idx:end_idx]
+            sorted_indices = np.argsort(day_prices)
+            for k in range(min(req_intervals, day_len)):
+                idx_in_day = sorted_indices[k]
+                force_charge_mask[start_idx + idx_in_day] = True
+                
+            min_p = day_prices[sorted_indices[0]]
+            for i_d in range(start_idx, end_idx):
+                if (export_prices[i_d] * grid_rte > min_p) and (export_prices[i_d] > 0):
+                    is_arbitrage_profitable_mask[i_d] = True
+                    
+            if strategy_id == 2 or strategy_id == 3:
+                max_exp = export_prices[start_idx]
+                min_exp = export_prices[start_idx]
+                for i_d in range(start_idx + 1, end_idx):
+                    if export_prices[i_d] > max_exp: max_exp = export_prices[i_d]
+                    if export_prices[i_d] < min_exp: min_exp = export_prices[i_d]
+                
+                is_dynamic_fit = (max_exp - min_exp) > 0.001
+                if is_dynamic_fit:
+                    day_exp_prices = export_prices[start_idx:end_idx]
+                    sorted_exp_indices = np.argsort(-day_exp_prices)
+                    for k in range(min(req_intervals, day_len)):
+                        idx_in_day = sorted_exp_indices[k]
+                        global_idx = start_idx + idx_in_day
+                        if export_prices[global_idx] > 0:
+                            pre_charge_mask[global_idx] = True
+                else:
+                    for i_d in range(start_idx, end_idx):
+                        if force_charge_mask[i_d]:
+                            p_start = max(start_idx, i_d - 8)
+                            for j_d in range(p_start, i_d):
+                                if not force_charge_mask[j_d]:
+                                    pre_charge_mask[j_d] = True
+
+        start_idx = end_idx
+
+    cheapest_sum = 0.0
+    cheapest_count = 0
+    for i in range(n):
+        if force_charge_mask[i]:
+            cheapest_sum += import_prices[i]
+            cheapest_count += 1
+    cheapest_import_rate = cheapest_sum / cheapest_count if cheapest_count > 0 else 99.0
+    
+    pos_exp_sum = 0.0
+    pos_exp_count = 0
+    for i in range(n):
+        if export_prices[i] > 0:
+            pos_exp_sum += export_prices[i]
+            pos_exp_count += 1
+    avg_export = pos_exp_sum / pos_exp_count if pos_exp_count > 0 else 0.0
+    arb_margin_c_kwh = ((avg_export * grid_rte) - cheapest_import_rate) * 100.0
+
+    return force_charge_mask, pre_charge_mask, is_arbitrage_profitable_mask, arb_margin_c_kwh
+
+
+@njit(fastmath=True)
+def _run_dynamic_simulation_from_arrays(consumption: np.ndarray, generation: np.ndarray,
+                                        hour_array: np.ndarray, month_array: np.ndarray, day_ids: np.ndarray,
+                                        import_prices: np.ndarray, export_prices: np.ndarray, 
+                                        strategy_id: int, usable_cap_kwh: float, min_soc_kwh: float, max_soc_kwh: float,
+                                        grid_rte: float, solar_charge_efficiency: float,
+                                        charge_rate: float, mic: float, mec: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Pure Numba JIT array-based kernel for dynamic wholesale battery simulation."""
+    grid_efficiency_sqrt = np.sqrt(grid_rte)
+    
+    hours_to_charge = usable_cap_kwh / max(0.5, charge_rate)
+    req_intervals = max(4, min(16, int(round(hours_to_charge * 2.0))))
+    
+    force_charge_mask, pre_charge_mask, is_arbitrage_profitable_mask, arb_margin_c_kwh = _calc_dynamic_masks(
+        import_prices, export_prices, day_ids, req_intervals, strategy_id, grid_rte
+    )
+    
+    grid_imports, grid_exports, soc_track = _fast_simulate(
+        consumption, generation, hour_array, month_array, 
+        force_charge_mask, pre_charge_mask, is_arbitrage_profitable_mask, usable_cap_kwh, min_soc_kwh, max_soc_kwh, grid_rte, 
+        solar_charge_efficiency, grid_efficiency_sqrt, charge_rate, mic, mec, strategy_id
+    )
+    
     return grid_imports, grid_exports, soc_track, arb_margin_c_kwh
 
 
 def run_dynamic_simulation(df_hdf: pd.DataFrame, import_prices: pd.Series, export_price: Any, 
                            strategy: str, params: SimulationParams) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Runs battery simulation for dynamic wholesale tariffs with adaptive force-charging duration."""
-    usable_cap_kwh = params.usable_capacity_kwh
-    min_soc_kwh, max_soc_kwh = params.min_soc_kwh, params.max_soc_kwh
-    grid_rte = params.grid_rte_decimal
-    grid_efficiency_sqrt = np.sqrt(grid_rte)
-    solar_charge_efficiency = params.solar_charge_efficiency
+    strategy_id = STRATEGY_MAP.get(strategy, 0)
+    imp_prices_arr = import_prices.values if isinstance(import_prices, pd.Series) else import_prices
     
-    strategy_map = {
-        'self-consumption': 0, 
-        'import-minimiser': 1, 
-        'export-maximiser': 2, 
-        'balanced-export-maximiser': 3, 
-        'import-minimiser-summer-pass': 4
-    }
-    
-    hours_to_charge = usable_cap_kwh / max(0.5, params.charge_rate)
-    req_intervals = max(4, min(16, int(round(hours_to_charge * 2.0))))
-    
-    df_temp = pd.DataFrame({'price': import_prices.values, 'date': df_hdf.index.date})
-    df_temp['rank'] = df_temp.groupby('date')['price'].rank(method='first')
-    force_charge_mask = (df_temp['rank'] <= req_intervals).values
-    
-    pre_charge_mask = np.zeros(len(force_charge_mask), dtype=np.bool_)
-    if strategy in ['export-maximiser', 'balanced-export-maximiser']:
-        is_dynamic_fit = isinstance(export_price, np.ndarray) and np.ptp(export_price) > 0.001
-        if is_dynamic_fit:
-            df_temp['export_price'] = export_price
-            df_temp['exp_rank'] = df_temp.groupby('date')['export_price'].rank(method='first', ascending=False)
-            pre_charge_mask = (df_temp['exp_rank'] <= req_intervals).values & (export_price > 0)
-        else:
-            for i in range(len(force_charge_mask)):
-                if force_charge_mask[i]:
-                    start_idx = max(0, i - 8)
-                    for j in range(start_idx, i):
-                        if not force_charge_mask[j]: pre_charge_mask[j] = True
-                        
-    min_daily_price = df_temp.groupby('date')['price'].transform('min').values
-    is_arbitrage_profitable_mask = ((export_price * grid_rte) > min_daily_price) & (export_price > 0)
-    
-    grid_imports, grid_exports, soc_track = _fast_simulate(
-        df_hdf['consumption'].values, df_hdf['generation'].values, df_hdf.index.hour.values, df_hdf.index.month.values, 
-        force_charge_mask, pre_charge_mask, is_arbitrage_profitable_mask, usable_cap_kwh, min_soc_kwh, max_soc_kwh, grid_rte, 
-        solar_charge_efficiency, grid_efficiency_sqrt, params.charge_rate, params.mic, params.mec, strategy_map.get(strategy, 0)
-    )
-    
-    cheapest_import_rate = np.mean(import_prices.values[force_charge_mask]) if np.any(force_charge_mask) else 99.0
-    if isinstance(export_price, np.ndarray):
-        pos_exports = export_price[export_price > 0]
-        avg_export = np.mean(pos_exports) if len(pos_exports) > 0 else 0.0
-        arb_margin_c_kwh = ((avg_export * grid_rte) - cheapest_import_rate) * 100.0
+    if isinstance(export_price, (int, float)):
+        exp_prices_arr = np.full(len(df_hdf), float(export_price), dtype=np.float64)
+    elif isinstance(export_price, pd.Series):
+        exp_prices_arr = export_price.values.astype(np.float64)
     else:
-        arb_margin_c_kwh = ((export_price * grid_rte) - cheapest_import_rate) * 100.0
+        exp_prices_arr = np.asarray(export_price, dtype=np.float64)
+        
+    dates_array = df_hdf.index.date
+    _, day_ids = np.unique(dates_array, return_inverse=True)
     
-    return grid_imports, grid_exports, soc_track, arb_margin_c_kwh
+    return _run_dynamic_simulation_from_arrays(
+        df_hdf['consumption'].values.astype(np.float64),
+        df_hdf['generation'].values.astype(np.float64),
+        df_hdf.index.hour.values.astype(np.int64),
+        df_hdf.index.month.values.astype(np.int64),
+        day_ids.astype(np.int64),
+        imp_prices_arr.astype(np.float64),
+        exp_prices_arr,
+        int(strategy_id),
+        float(params.usable_capacity_kwh),
+        float(params.min_soc_kwh),
+        float(params.max_soc_kwh),
+        float(params.grid_rte_decimal),
+        float(params.solar_charge_efficiency),
+        float(params.charge_rate),
+        float(params.mic),
+        float(params.mec)
+    )
 
 
 def evaluate_dual_tariffs(df_res: pd.DataFrame, df_hdf: pd.DataFrame, 
@@ -349,3 +465,79 @@ def evaluate_dual_tariffs(df_res: pd.DataFrame, df_hdf: pd.DataFrame,
     # Sort by lowest net annual bill
     dual_results.sort(key=lambda x: x.net_annual_bill)
     return dual_results
+
+
+@njit(fastmath=True)
+def _calc_ideal_daily_adaptive(costs_matrix: np.ndarray, exp_rev_matrix: np.ndarray,
+                               imports_matrix: np.ndarray, exports_matrix: np.ndarray,
+                               soc_matrix: np.ndarray, day_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Computes ideal daily adaptive strategy selection using pure Numba JIT.
+    costs_matrix: shape (5, N)
+    exp_rev_matrix: shape (5, N)
+    imports_matrix: shape (5, N)
+    exports_matrix: shape (5, N)
+    soc_matrix: shape (5, N)
+    """
+    n = costs_matrix.shape[1]
+    num_days = day_ids[-1] + 1 if n > 0 else 0
+    
+    ideal_imp = np.zeros(n, dtype=np.float64)
+    ideal_exp = np.zeros(n, dtype=np.float64)
+    ideal_soc = np.zeros(n, dtype=np.float64)
+    ideal_costs = np.zeros(n, dtype=np.float64)
+    ideal_exp_rev = np.zeros(n, dtype=np.float64)
+    win_counts = np.zeros(5, dtype=np.int64)
+    
+    start_idx = 0
+    for day in range(num_days):
+        end_idx = start_idx
+        while end_idx < n and day_ids[end_idx] == day:
+            end_idx += 1
+            
+        day_len = end_idx - start_idx
+        if day_len > 0:
+            best_strat = 0
+            best_day_cost = 1e9
+            for s in range(5):
+                net_c = 0.0
+                for i in range(start_idx, end_idx):
+                    net_c += costs_matrix[s, i] - exp_rev_matrix[s, i]
+                if net_c < best_day_cost:
+                    best_day_cost = net_c
+                    best_strat = s
+                    
+            win_counts[best_strat] += 1
+            for i in range(start_idx, end_idx):
+                ideal_imp[i] = imports_matrix[best_strat, i]
+                ideal_exp[i] = exports_matrix[best_strat, i]
+                ideal_soc[i] = soc_matrix[best_strat, i]
+                ideal_costs[i] = costs_matrix[best_strat, i]
+                ideal_exp_rev[i] = exp_rev_matrix[best_strat, i]
+                
+        start_idx = end_idx
+        
+    return ideal_imp, ideal_exp, ideal_soc, ideal_costs, ideal_exp_rev, win_counts
+
+
+def warmup_engine():
+    """Trigger Numba JIT compilation ahead of time using dummy 1D/2D arrays."""
+    n = 48
+    dummy_float = np.zeros(n, dtype=np.float64)
+    dummy_int = np.zeros(n, dtype=np.int64)
+    dummy_bool = np.zeros(n, dtype=np.bool_)
+    dummy_bool_24 = np.zeros(24, dtype=np.bool_)
+    dummy_matrix = np.zeros((5, n), dtype=np.float64)
+
+    # Pre-compile all Numba @njit kernels ahead of time
+    _ = _calc_cost_with_overage(dummy_float, dummy_float, dummy_bool, 0.0, dummy_int, False)
+    _ = _fast_simulate(dummy_float, dummy_float, dummy_int, dummy_int, dummy_bool, dummy_bool, dummy_bool, 10.0, 1.0, 9.0, 0.9, 0.95, np.sqrt(0.9), 3.0, 5.0, 5.0, 0)
+    _ = _run_simulation_from_arrays(dummy_float, dummy_float, dummy_int, dummy_int, dummy_float, 0.18, dummy_bool_24, 0, 10.0, 1.0, 9.0, 0.9, 0.95, 3.0, 5.0, 5.0)
+    _ = _calc_dynamic_masks(dummy_float, dummy_float, dummy_int, 4, 0, 0.9)
+    _ = _run_dynamic_simulation_from_arrays(dummy_float, dummy_float, dummy_int, dummy_int, dummy_int, dummy_float, dummy_float, 0, 10.0, 1.0, 9.0, 0.9, 0.95, 3.0, 5.0, 5.0)
+    _ = _calc_ideal_daily_adaptive(dummy_matrix, dummy_matrix, dummy_matrix, dummy_matrix, dummy_matrix, dummy_int)
+
+
+# Automatically pre-compile Numba kernels on module load
+warmup_engine()
+
