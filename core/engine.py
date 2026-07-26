@@ -4,7 +4,8 @@ import pandas as pd
 from numba import njit
 from typing import Tuple, Dict, Any, List, Optional
 
-from core.models import SimulationParams, DualTariffParams, DualTariffResult, HardwareExpansionParams, HardwareScenarioResult
+from core.models import (SimulationParams, DualTariffParams, DualTariffResult, 
+                         HardwareExpansionParams, HardwareScenarioResult, FinancialROIParams, FinancialROICalculator)
 
 @njit
 def _calc_cost_with_overage(imports: np.ndarray, prices: np.ndarray, is_ev_window: np.ndarray, 
@@ -761,10 +762,28 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
         
         if r['is_base']:
             payback = 0.0
+            npv_val = 0.0
+            roi_pct_val = 0.0
         elif savings > 0.01:
             payback = capex / savings
+            roi_res = FinancialROICalculator.calculate_roi(
+                savings,
+                FinancialROIParams(
+                    battery_capex=capex,
+                    inverter_capex=0.0,
+                    grant_amount=0.0,
+                    horizon_years=10,
+                    electricity_inflation_pct=3.0,
+                    annual_degradation_pct=2.0,
+                    discount_rate_pct=5.0
+                )
+            )
+            npv_val = roi_res['npv']
+            roi_pct_val = roi_res['roi_percent']
         else:
             payback = 999.0
+            npv_val = -capex
+            roi_pct_val = -100.0
             
         if not r['is_base'] and savings > 0 and payback < best_payback:
             best_payback = payback
@@ -782,6 +801,8 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
             incremental_savings=round(savings, 2),
             expansion_capex=round(capex, 2),
             simple_payback_years=round(payback, 1) if payback < 900 else 99.0,
+            ten_year_npv=round(npv_val, 2),
+            ten_year_roi_percent=round(roi_pct_val, 1),
             is_sweet_spot=False,
             is_baseline=r['is_base']
         ))

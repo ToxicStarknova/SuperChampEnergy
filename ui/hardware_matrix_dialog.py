@@ -134,28 +134,42 @@ class HardwareMatrixDialog(ctk.CTkToplevel):
 
         # KPI 1: Sweet Spot Config
         kpi1 = ctk.CTkFrame(self.kpi_frame, fg_color="#065f46", corner_radius=8)
-        kpi1.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        ctk.CTkLabel(kpi1, text="🏆 SWEET SPOT CONFIG", font=ctk.CTkFont(size=10, weight="bold"), text_color="#6ee7b7").pack(anchor="w", padx=12, pady=(8, 0))
-        cfg_str = f"+{int(sweet_spot.battery_addition_kwh)} kWh Batt | +{int(round((sweet_spot.pv_scale_factor-1)*100))}% PV (+{sweet_spot.pv_addition_kwp} kWp)"
-        ctk.CTkLabel(kpi1, text=cfg_str, font=ctk.CTkFont(size=13, weight="bold"), text_color="#ffffff").pack(anchor="w", padx=12, pady=(0, 8))
+        kpi1.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ctk.CTkLabel(kpi1, text="🏆 SWEET SPOT CONFIG", font=ctk.CTkFont(size=9, weight="bold"), text_color="#6ee7b7").pack(anchor="w", padx=10, pady=(6, 0))
+        cfg_str = f"+{int(sweet_spot.battery_addition_kwh)}kWh Batt | +{int(round((sweet_spot.pv_scale_factor-1)*100))}% PV"
+        ctk.CTkLabel(kpi1, text=cfg_str, font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffffff").pack(anchor="w", padx=10, pady=(0, 6))
 
         # KPI 2: CapEx Required
         kpi2 = ctk.CTkFrame(self.kpi_frame, fg_color="#1e293b", corner_radius=8)
-        kpi2.pack(side="left", fill="x", expand=True, padx=5)
-        ctk.CTkLabel(kpi2, text="💶 EXPANSION CAPEX", font=ctk.CTkFont(size=10, weight="bold"), text_color="#94a3b8").pack(anchor="w", padx=12, pady=(8, 0))
-        ctk.CTkLabel(kpi2, text=f"€{sweet_spot.expansion_capex:,.0f}", font=ctk.CTkFont(size=14, weight="bold"), text_color="#38bdf8").pack(anchor="w", padx=12, pady=(0, 8))
+        kpi2.pack(side="left", fill="x", expand=True, padx=4)
+        ctk.CTkLabel(kpi2, text="💶 CAPEX REQUIRED", font=ctk.CTkFont(size=9, weight="bold"), text_color="#94a3b8").pack(anchor="w", padx=10, pady=(6, 0))
+        ctk.CTkLabel(kpi2, text=f"€{sweet_spot.expansion_capex:,.0f}", font=ctk.CTkFont(size=13, weight="bold"), text_color="#38bdf8").pack(anchor="w", padx=10, pady=(0, 6))
 
         # KPI 3: Extra Annual Savings
         kpi3 = ctk.CTkFrame(self.kpi_frame, fg_color="#1e293b", corner_radius=8)
-        kpi3.pack(side="left", fill="x", expand=True, padx=5)
-        ctk.CTkLabel(kpi3, text="📈 INCREMENTAL SAVINGS", font=ctk.CTkFont(size=10, weight="bold"), text_color="#94a3b8").pack(anchor="w", padx=12, pady=(8, 0))
-        ctk.CTkLabel(kpi3, text=f"€{sweet_spot.incremental_savings:,.2f} / yr", font=ctk.CTkFont(size=14, weight="bold"), text_color="#4ade80").pack(anchor="w", padx=12, pady=(0, 8))
+        kpi3.pack(side="left", fill="x", expand=True, padx=4)
+        ctk.CTkLabel(kpi3, text="📈 INCREMENTAL SAVINGS", font=ctk.CTkFont(size=9, weight="bold"), text_color="#94a3b8").pack(anchor="w", padx=10, pady=(6, 0))
+        ctk.CTkLabel(kpi3, text=f"€{sweet_spot.incremental_savings:,.2f}/yr", font=ctk.CTkFont(size=13, weight="bold"), text_color="#4ade80").pack(anchor="w", padx=10, pady=(0, 6))
 
         # KPI 4: Simple Payback
         kpi4 = ctk.CTkFrame(self.kpi_frame, fg_color="#1e293b", corner_radius=8)
-        kpi4.pack(side="left", fill="x", expand=True, padx=(5, 0))
-        ctk.CTkLabel(kpi4, text="⏱️ SIMPLE PAYBACK", font=ctk.CTkFont(size=10, weight="bold"), text_color="#94a3b8").pack(anchor="w", padx=12, pady=(8, 0))
-        ctk.CTkLabel(kpi4, text=f"{sweet_spot.simple_payback_years:.1f} Years", font=ctk.CTkFont(size=14, weight="bold"), text_color="#facc15").pack(anchor="w", padx=12, pady=(0, 8))
+        kpi4.pack(side="left", fill="x", expand=True, padx=4)
+        ctk.CTkLabel(kpi4, text="⏱️ SIMPLE PAYBACK", font=ctk.CTkFont(size=9, weight="bold"), text_color="#94a3b8").pack(anchor="w", padx=10, pady=(6, 0))
+        ctk.CTkLabel(kpi4, text=f"{sweet_spot.simple_payback_years:.1f} Yrs", font=ctk.CTkFont(size=13, weight="bold"), text_color="#facc15").pack(anchor="w", padx=10, pady=(0, 6))
+
+        # KPI 5: 10-Year Net Present Value (NPV)
+        kpi5 = ctk.CTkFrame(self.kpi_frame, fg_color="#1e293b", corner_radius=8)
+        kpi5.pack(side="left", fill="x", expand=True, padx=4)
+        ctk.CTkLabel(kpi5, text="📊 10-YR NET NPV", font=ctk.CTkFont(size=9, weight="bold"), text_color="#94a3b8").pack(anchor="w", padx=10, pady=(6, 0))
+        npv_color = "#34d399" if sweet_spot.ten_year_npv > 0 else "#f87171"
+        ctk.CTkLabel(kpi5, text=f"€{sweet_spot.ten_year_npv:,.2f}", font=ctk.CTkFont(size=13, weight="bold"), text_color=npv_color).pack(anchor="w", padx=10, pady=(0, 6))
+
+        # KPI 6: 10-Year ROI %
+        kpi6 = ctk.CTkFrame(self.kpi_frame, fg_color="#1e293b", corner_radius=8)
+        kpi6.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        ctk.CTkLabel(kpi6, text="💹 10-YR ROI %", font=ctk.CTkFont(size=9, weight="bold"), text_color="#94a3b8").pack(anchor="w", padx=10, pady=(6, 0))
+        roi_color = "#a78bfa" if sweet_spot.ten_year_roi_percent > 0 else "#f87171"
+        ctk.CTkLabel(kpi6, text=f"{sweet_spot.ten_year_roi_percent:.1f}%", font=ctk.CTkFont(size=13, weight="bold"), text_color=roi_color).pack(anchor="w", padx=10, pady=(0, 6))
 
     def _render_matrix(self):
         for widget in self.matrix_container.winfo_children():
@@ -222,23 +236,27 @@ class HardwareMatrixDialog(ctk.CTkToplevel):
                 # Badge Header
                 header_txt = "BASELINE" if res.is_baseline else ("🏆 SWEET SPOT" if res.is_sweet_spot else f"CapEx: €{res.expansion_capex:,.0f}")
                 header_clr = "#94a3b8" if res.is_baseline else ("#34d399" if res.is_sweet_spot else "#38bdf8")
-                ctk.CTkLabel(cell_frame, text=header_txt, font=ctk.CTkFont(size=9, weight="bold"), text_color=header_clr).pack(anchor="w", padx=8, pady=(6, 0))
+                ctk.CTkLabel(cell_frame, text=header_txt, font=ctk.CTkFont(size=9, weight="bold"), text_color=header_clr).pack(anchor="w", padx=8, pady=(4, 0))
 
                 # Bill Value
-                ctk.CTkLabel(cell_frame, text=f"Bill: €{res.annual_bill:,.0f}/yr", font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffffff").pack(anchor="w", padx=8, pady=(2, 0))
+                ctk.CTkLabel(cell_frame, text=f"Bill: €{res.annual_bill:,.0f}/yr", font=ctk.CTkFont(size=12, weight="bold"), text_color="#ffffff").pack(anchor="w", padx=8, pady=(1, 0))
 
                 # Delta Savings & Payback
                 if res.is_baseline:
                     sub_txt = "Baseline Reference"
                     sub_clr = "#94a3b8"
+                    npv_txt = "NPV: €0 | ROI: 0%"
                 elif res.incremental_savings > 0:
                     sub_txt = f"+€{res.incremental_savings:,.0f}/yr | {res.simple_payback_years:.1f} yrs"
                     sub_clr = "#4ade80"
+                    npv_txt = f"10yr NPV: €{res.ten_year_npv:,.0f} | ROI: {res.ten_year_roi_percent:.0f}%"
                 else:
                     sub_txt = "No Extra Savings"
                     sub_clr = "#f87171"
+                    npv_txt = "NPV: Negative | ROI: -100%"
 
-                ctk.CTkLabel(cell_frame, text=sub_txt, font=ctk.CTkFont(size=10, weight="bold"), text_color=sub_clr).pack(anchor="w", padx=8, pady=(0, 6))
+                ctk.CTkLabel(cell_frame, text=sub_txt, font=ctk.CTkFont(size=10, weight="bold"), text_color=sub_clr).pack(anchor="w", padx=8, pady=(0, 0))
+                ctk.CTkLabel(cell_frame, text=npv_txt, font=ctk.CTkFont(size=9), text_color="#cbd5e1").pack(anchor="w", padx=8, pady=(0, 4))
 
                 # Detailed Tooltip
                 tip_text = (
@@ -249,6 +267,8 @@ class HardwareMatrixDialog(ctk.CTkToplevel):
                     f"Annual Bill: €{res.annual_bill:,.2f}\n"
                     f"Incremental Savings vs Baseline: €{res.incremental_savings:,.2f} / year\n"
                     f"Expansion CapEx: €{res.expansion_capex:,.2f}\n"
-                    f"Simple Payback: {res.simple_payback_years:.1f} Years"
+                    f"Simple Payback: {res.simple_payback_years:.1f} Years\n"
+                    f"10-Year Net Present Value (NPV): €{res.ten_year_npv:,.2f}\n"
+                    f"10-Year Return on Investment (ROI): {res.ten_year_roi_percent:.1f}%"
                 )
                 ToolTip(cell_frame, tip_text)

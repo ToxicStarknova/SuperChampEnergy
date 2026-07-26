@@ -147,6 +147,8 @@ class HardwareScenarioResult:
     incremental_savings: float
     expansion_capex: float
     simple_payback_years: float
+    ten_year_npv: float = 0.0
+    ten_year_roi_percent: float = 0.0
     is_sweet_spot: bool = False
     is_baseline: bool = False
 
