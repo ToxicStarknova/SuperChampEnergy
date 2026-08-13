@@ -64,6 +64,7 @@ def _fast_simulate(consumptions: np.ndarray, generations: np.ndarray, hours: np.
       2: export-maximiser
       3: balanced-export-maximiser
       4: import-minimiser-summer-pass
+      5: import-only-no-pv
     """
     n = len(consumptions)
     grid_imports, grid_exports, soc_track = np.zeros(n), np.zeros(n), np.zeros(n)
@@ -104,6 +105,9 @@ def _fast_simulate(consumptions: np.ndarray, generations: np.ndarray, hours: np.
                 grid_export += excess_solar
             elif strategy_id == 4 and is_summer:
                 # FIX: Strategy 4 ("Summer Pass") bypasses solar charging during summer months regardless of arbitrage margin
+                grid_export += excess_solar
+            elif strategy_id == 5:
+                # import-only-no-pv completely bypasses solar charging year-round
                 grid_export += excess_solar
             else:
                 space_in_battery = max(0.0, max_soc_kwh - battery_soc)
@@ -158,7 +162,8 @@ STRATEGY_MAP = {
     'import-minimiser': 1, 
     'export-maximiser': 2, 
     'balanced-export-maximiser': 3, 
-    'import-minimiser-summer-pass': 4
+    'import-minimiser-summer-pass': 4,
+    'import-only-no-pv': 5
 }
 
 
@@ -488,7 +493,8 @@ def _calc_ideal_daily_adaptive(costs_matrix: np.ndarray, exp_rev_matrix: np.ndar
     ideal_soc = np.zeros(n, dtype=np.float64)
     ideal_costs = np.zeros(n, dtype=np.float64)
     ideal_exp_rev = np.zeros(n, dtype=np.float64)
-    win_counts = np.zeros(5, dtype=np.int64)
+    win_counts = np.zeros(6, dtype=np.int64)
+    daily_winners = np.zeros(num_days, dtype=np.int64)
     
     start_idx = 0
     for day in range(num_days):
@@ -500,7 +506,7 @@ def _calc_ideal_daily_adaptive(costs_matrix: np.ndarray, exp_rev_matrix: np.ndar
         if day_len > 0:
             best_strat = 0
             best_day_cost = 1e9
-            for s in range(5):
+            for s in range(6):
                 net_c = 0.0
                 for i in range(start_idx, end_idx):
                     net_c += costs_matrix[s, i] - exp_rev_matrix[s, i]
@@ -509,6 +515,7 @@ def _calc_ideal_daily_adaptive(costs_matrix: np.ndarray, exp_rev_matrix: np.ndar
                     best_strat = s
                     
             win_counts[best_strat] += 1
+            daily_winners[day] = best_strat
             for i in range(start_idx, end_idx):
                 ideal_imp[i] = imports_matrix[best_strat, i]
                 ideal_exp[i] = exports_matrix[best_strat, i]
@@ -518,7 +525,7 @@ def _calc_ideal_daily_adaptive(costs_matrix: np.ndarray, exp_rev_matrix: np.ndar
                 
         start_idx = end_idx
         
-    return ideal_imp, ideal_exp, ideal_soc, ideal_costs, ideal_exp_rev, win_counts
+    return ideal_imp, ideal_exp, ideal_soc, ideal_costs, ideal_exp_rev, win_counts, daily_winners
 
 
 def warmup_engine():
@@ -528,7 +535,7 @@ def warmup_engine():
     dummy_int = np.zeros(n, dtype=np.int64)
     dummy_bool = np.zeros(n, dtype=np.bool_)
     dummy_bool_24 = np.zeros(24, dtype=np.bool_)
-    dummy_matrix = np.zeros((5, n), dtype=np.float64)
+    dummy_matrix = np.zeros((6, n), dtype=np.float64)
 
     # Pre-compile all Numba @njit kernels ahead of time
     _ = _calc_cost_with_overage(dummy_float, dummy_float, dummy_bool, 0.0, dummy_int, False)
@@ -574,7 +581,7 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
     battery_additions = [0.0, 5.0, 10.0, 15.0, 20.0]
     pv_scale_factors = [1.0, 1.2, 1.4, 1.6, 1.8, 2.0]
     
-    all_strategies = ['self-consumption', 'import-minimiser', 'export-maximiser', 'balanced-export-maximiser', 'import-minimiser-summer-pass']
+    all_strategies = ['self-consumption', 'import-minimiser', 'export-maximiser', 'balanced-export-maximiser', 'import-minimiser-summer-pass', 'import-only-no-pv']
     
     # Pre-parse tariff rates & static arrays once across all scenarios
     fixed_tariff_data = []
@@ -637,11 +644,11 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
             'fixed_charges': fixed_charges, 'cash_bonus': cash_bonus
         })
         
-    costs_matrix = np.zeros((5, n_samples), dtype=np.float64)
-    exp_rev_matrix = np.zeros((5, n_samples), dtype=np.float64)
-    imports_matrix = np.zeros((5, n_samples), dtype=np.float64)
-    exports_matrix = np.zeros((5, n_samples), dtype=np.float64)
-    soc_matrix = np.zeros((5, n_samples), dtype=np.float64)
+    costs_matrix = np.zeros((6, n_samples), dtype=np.float64)
+    exp_rev_matrix = np.zeros((6, n_samples), dtype=np.float64)
+    imports_matrix = np.zeros((6, n_samples), dtype=np.float64)
+    exports_matrix = np.zeros((6, n_samples), dtype=np.float64)
+    soc_matrix = np.zeros((6, n_samples), dtype=np.float64)
 
     raw_results = []
     baseline_bill = 0.0
@@ -660,7 +667,7 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
             
             # Evaluate Fixed Tariffs
             for ft in fixed_tariff_data:
-                for strat_idx in range(5):
+                for strat_idx in range(6):
                     imp, exp, soc, _ = _run_simulation_from_arrays(
                         orig_imports, scaled_exports, hours_array, months_array,
                         ft['import_prices_arr'], ft['fit_rate'], ft['fc_24'], strat_idx,
@@ -685,7 +692,7 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
                         best_strategy = all_strategies[strat_idx]
                         
                 # Ideal Daily Adaptive
-                _, _, _, ideal_costs, ideal_exp_rev, _ = _calc_ideal_daily_adaptive(
+                _, _, _, ideal_costs, ideal_exp_rev, _, _ = _calc_ideal_daily_adaptive(
                     costs_matrix, exp_rev_matrix, imports_matrix, exports_matrix, soc_matrix, day_ids
                 )
                 ideal_bill = (np.sum(ideal_costs) - np.sum(ideal_exp_rev)) * scaling_factor + ft['fixed_charges'] - ft['cash_bonus']
@@ -697,7 +704,7 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
 
             # Evaluate Dynamic Tariffs
             for dt in dynamic_tariff_data:
-                for strat_idx in range(5):
+                for strat_idx in range(6):
                     imp, exp, soc, _ = _run_dynamic_simulation_from_arrays(
                         orig_imports, scaled_exports, hours_array, months_array, day_ids,
                         dt['import_prices_arr'], dt['fit_rate_arr'], strat_idx,
@@ -722,7 +729,7 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
                         best_strategy = all_strategies[strat_idx]
                         
                 # Ideal Daily Adaptive
-                _, _, _, ideal_costs, ideal_exp_rev, _ = _calc_ideal_daily_adaptive(
+                _, _, _, ideal_costs, ideal_exp_rev, _, _ = _calc_ideal_daily_adaptive(
                     costs_matrix, exp_rev_matrix, imports_matrix, exports_matrix, soc_matrix, day_ids
                 )
                 ideal_bill = (np.sum(ideal_costs) - np.sum(ideal_exp_rev)) * scaling_factor + dt['fixed_charges'] - dt['cash_bonus']

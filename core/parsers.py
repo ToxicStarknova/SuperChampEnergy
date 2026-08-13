@@ -105,7 +105,7 @@ def normalize_tariff_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def get_half_hourly_rates_for_row(row: pd.Series, date_range: pd.DatetimeIndex) -> Tuple[pd.Series, np.ndarray, float, bool, bool, bool]:
+def get_half_hourly_rates_for_row(row: pd.Series, date_range: pd.DatetimeIndex) -> Tuple[np.ndarray, np.ndarray, float, bool, bool, bool]:
     """Generates half-hourly price series and EV window mask for a single tariff row."""
     plan_type = str(row['Plan type']).strip().lower()
     

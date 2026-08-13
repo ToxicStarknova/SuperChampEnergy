@@ -33,7 +33,8 @@ The application parses ESB Networks HDF (Harmonised Data Files) containing 30-mi
 3. **Export-Maximiser:** Forces a battery energy dump directly to the grid prior to cheap windows starting to clear space for low-cost power.
 4. **Balanced Export Maximiser:** Runs arbitrage dump protocols during spring/summer while preserving winter heating security bounds.
 5. **Import-Minimiser (Summer Pass):** Prevents solar generation from charging the battery between March and October to bypass structural round-trip AC/DC conversion losses.
-6. **Ideal Daily Adaptive:** Oracle EMS strategy that dynamically selects the single best-performing strategy for each individual day of the year.
+6. **Import-Only-No-PV:** Force-charges the battery at night up to max capacity, but completely bypasses solar charging year-round.
+7. **Ideal Daily Adaptive:** Oracle EMS strategy that dynamically selects the single best-performing strategy for each individual day of the year.
 
 ---
 

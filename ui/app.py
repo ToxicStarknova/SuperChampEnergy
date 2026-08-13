@@ -181,6 +181,7 @@ class HomeBatteryCalculatorApp:
             ("• Export-Maximiser", "Dumps battery to grid before cheap hours.", "Forces a proactive battery energy dump directly to the grid in the 4 hours prior to the cheap window starting."),
             ("• Balanced-Export", "Arbitrages in summer; preserves winter power.", "Runs arbitrage dump protocols during spring/summer, but preserves winter heating security bounds."),
             ("• Import-Min (Pass)", "Bypasses battery charging in summer cycle.", "Prevents solar generation from charging battery between March and October to bypass structural round efficiency losses."),
+            ("• Import-Only (No PV)", "Force-charges at night; never charges from PV.", "Force-charges the battery at night up to max capacity, but completely bypasses solar charging year-round."),
             ("• Ideal Daily Adaptive", "Oracle EMS: Picks optimal strategy each day.", "Evaluates every strategy on each individual day to model theoretical maximum smart EMS savings benchmark.")
         ]
         
@@ -198,15 +199,10 @@ class HomeBatteryCalculatorApp:
                                      fg_color="#4f46e5", hover_color="#4338ca", command=self.start_sweep_thread)
         self.btn_run.pack(side=tk.BOTTOM, fill=tk.X, ipady=6, padx=(0, 10), pady=(10, 0))
 
-        # 4. Engine Telemetry Box
-        self.stats_frame = ctk.CTkFrame(left_panel, corner_radius=10)
-        self.stats_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 0), padx=(0, 10))
-        ctk.CTkLabel(self.stats_frame, text="Engine Telemetry Console", font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(10, 2))
-        
-        self.txt_stats = ctk.CTkTextbox(self.stats_frame, font=("Consolas", 11), fg_color=("#f8fafc", "#0f172a"), border_width=1)
-        self.txt_stats.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
-        self.txt_stats.insert(tk.END, "Waiting for optimization sweep execution...")
-        self.txt_stats.configure(state="disabled")
+        # Telemetry variables
+        self.telemetry_popup = None
+        self.txt_stats = None
+        self.btn_telemetry_ok = None
 
         # --- RIGHT ANALYSIS NOTEBOOK ---
         self.right_notebook = ttk.Notebook(workspace)
@@ -410,9 +406,15 @@ class HomeBatteryCalculatorApp:
                     self.update_console(text, color)
                 elif msg_type == "SWEEP_COMPLETE":
                     self.btn_run.configure(state="normal", text="Run Optimization Sweep")
+                    if self.btn_telemetry_ok is not None and self.btn_telemetry_ok.winfo_exists():
+                        self.btn_telemetry_ok.configure(state="normal")
+                        self.telemetry_popup.protocol("WM_DELETE_WINDOW", self.telemetry_popup.destroy)
                     self.on_sweep_finished(payload)
                 elif msg_type == "SWEEP_ERROR":
                     self.btn_run.configure(state="normal", text="Run Optimization Sweep")
+                    if self.btn_telemetry_ok is not None and self.btn_telemetry_ok.winfo_exists():
+                        self.btn_telemetry_ok.configure(state="normal")
+                        self.telemetry_popup.protocol("WM_DELETE_WINDOW", self.telemetry_popup.destroy)
                     messagebox.showerror("Error", str(payload))
                     self.update_console("Simulation Failure occurred during execution loop tracking.", "#ef4444")
         except queue.Empty:
@@ -421,10 +423,11 @@ class HomeBatteryCalculatorApp:
             self.root.after(100, self.check_queue_loop)
 
     def update_console(self, text_string, color_hex="#334155"):
-        self.txt_stats.configure(state="normal")
-        self.txt_stats.delete("1.0", tk.END)
-        self.txt_stats.insert(tk.END, text_string)
-        self.txt_stats.configure(state="disabled", text_color=color_hex)
+        if self.txt_stats is not None and self.txt_stats.winfo_exists():
+            self.txt_stats.configure(state="normal")
+            self.txt_stats.delete("1.0", tk.END)
+            self.txt_stats.insert(tk.END, text_string)
+            self.txt_stats.configure(state="disabled", text_color=color_hex)
 
     def treeview_sort_column(self, tv, col, reverse):
         l = []
@@ -440,22 +443,24 @@ class HomeBatteryCalculatorApp:
                 return (0, val_clean.lower())
                 
         l.sort(key=lambda t: clean_val(t[0]), reverse=reverse)
-        for index, (val, k) in enumerate(l):
-            tv.move(k, '', index)
         tv.heading(col, command=lambda: self.treeview_sort_column(tv, col, not reverse))
 
         # Re-sync leaderboard_data with treeview visual order
         if self.leaderboard_data is not None and not self.leaderboard_data.empty:
-            sorted_indices = []
-            for k in tv.get_children(''):
-                row_vals = tv.item(k)['values']
-                supp, t_name, strat = row_vals[1], row_vals[2], row_vals[3].lower().replace(' ', '-')
-                match = self.leaderboard_data[(self.leaderboard_data['Supplier'] == supp) & (self.leaderboard_data['Tariff'] == t_name)]
-                if not match.empty:
-                    sorted_indices.append(match.index[0])
-            if len(sorted_indices) == len(self.leaderboard_data):
-                self.leaderboard_data = self.leaderboard_data.reindex(sorted_indices).reset_index(drop=True)
-                self.update_subtabs_from_leaderboard()
+            try:
+                sorted_indices = [int(item[1]) for item in l]
+                if len(sorted_indices) == len(self.leaderboard_data):
+                    self.leaderboard_data = self.leaderboard_data.iloc[sorted_indices].reset_index(drop=True)
+                    self.populate_treeview()
+                    self.update_subtabs_from_leaderboard()
+            except (ValueError, IndexError, KeyError):
+                for index, (val, k) in enumerate(l):
+                    tv.move(k, '', index)
+                    tv.set(k, "rank", index + 1)
+        else:
+            for index, (val, k) in enumerate(l):
+                tv.move(k, '', index)
+                tv.set(k, "rank", index + 1)
 
     def browse_hdf(self):
         f = filedialog.askopenfilename(filetypes=[("HDF CSV", "*.csv")])
@@ -543,6 +548,23 @@ class HomeBatteryCalculatorApp:
             return
 
         self.btn_run.configure(state="disabled", text="Running Optimization Sweep...")
+        
+        # Telemetry Popup
+        self.telemetry_popup = ctk.CTkToplevel(self.root)
+        self.telemetry_popup.title("Engine Telemetry")
+        self.telemetry_popup.geometry("600x400")
+        self.telemetry_popup.transient(self.root)
+        self.telemetry_popup.protocol("WM_DELETE_WINDOW", lambda: None)
+        self.telemetry_popup.grab_set()
+        
+        ctk.CTkLabel(self.telemetry_popup, text="Engine Telemetry Console", font=("Segoe UI", 12, "bold")).pack(anchor=tk.W, padx=12, pady=(10, 2))
+        self.txt_stats = ctk.CTkTextbox(self.telemetry_popup, font=("Consolas", 11), fg_color=("#f8fafc", "#0f172a"), border_width=1)
+        self.txt_stats.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        self.txt_stats.configure(state="disabled")
+        
+        self.btn_telemetry_ok = ctk.CTkButton(self.telemetry_popup, text="OK", command=self.telemetry_popup.destroy, state="disabled")
+        self.btn_telemetry_ok.pack(pady=(0, 10))
+        
         self.update_console("Parsing Input Data & Pre-compiling Engine Tracks...", "#f59e0b")
         
         thread = threading.Thread(target=self._run_sweep_worker, args=(params,), daemon=True)
@@ -606,17 +628,17 @@ class HomeBatteryCalculatorApp:
             scaling_factor = 365.0 / num_days if num_days > 0 else 1.0
             is_short_duration = num_days < 330
             exceeded_plans = []
-            all_strategies = ['self-consumption', 'import-minimiser', 'export-maximiser', 'balanced-export-maximiser', 'import-minimiser-summer-pass']
+            all_strategies = ['self-consumption', 'import-minimiser', 'export-maximiser', 'balanced-export-maximiser', 'import-minimiser-summer-pass', 'import-only-no-pv']
             
             days_june = max(1, np.sum(mask_june) // 48)
             days_dec = max(1, np.sum(mask_dec) // 48)
 
-            # Pre-allocate 2D buffers (5 x N) for strategy outputs per tariff
-            costs_matrix = np.zeros((5, n_samples), dtype=np.float64)
-            exp_rev_matrix = np.zeros((5, n_samples), dtype=np.float64)
-            imports_matrix = np.zeros((5, n_samples), dtype=np.float64)
-            exports_matrix = np.zeros((5, n_samples), dtype=np.float64)
-            soc_matrix = np.zeros((5, n_samples), dtype=np.float64)
+            # Pre-allocate 2D buffers (6 x N) for strategy outputs per tariff
+            costs_matrix = np.zeros((6, n_samples), dtype=np.float64)
+            exp_rev_matrix = np.zeros((6, n_samples), dtype=np.float64)
+            imports_matrix = np.zeros((6, n_samples), dtype=np.float64)
+            exports_matrix = np.zeros((6, n_samples), dtype=np.float64)
+            soc_matrix = np.zeros((6, n_samples), dtype=np.float64)
 
             # 1. Standard Fixed Sweep Track
             for _, row in valid_tariffs.iterrows():
@@ -668,7 +690,7 @@ class HomeBatteryCalculatorApp:
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': False
                 })
 
-                for strat_idx in range(5):
+                for strat_idx in range(6):
                     strategy = all_strategies[strat_idx]
                     imports, exports, soc, is_arb = _run_simulation_from_arrays(
                         orig_imports, orig_exports, hours_array, months_array,
@@ -708,11 +730,11 @@ class HomeBatteryCalculatorApp:
                     })
 
                 # --- IDEAL DAILY ADAPTIVE STRATEGY (PURE NUMBA JIT) ---
-                ideal_imp, ideal_exp, ideal_soc, ideal_costs, ideal_exp_rev, win_counts = _calc_ideal_daily_adaptive(
+                ideal_imp, ideal_exp, ideal_soc, ideal_costs, ideal_exp_rev, win_counts, daily_winners = _calc_ideal_daily_adaptive(
                     costs_matrix, exp_rev_matrix, imports_matrix, exports_matrix, soc_matrix, day_ids
                 )
-                strategy_win_counts = {all_strategies[i]: int(win_counts[i]) for i in range(5)}
-                detailed_results[tid]['ideal-daily-adaptive'] = {'import': ideal_imp, 'export': ideal_exp, 'soc': ideal_soc, 'win_counts': strategy_win_counts}
+                strategy_win_counts = {all_strategies[i]: int(win_counts[i]) for i in range(6)}
+                detailed_results[tid]['ideal-daily-adaptive'] = {'import': ideal_imp, 'export': ideal_exp, 'soc': ideal_soc, 'win_counts': strategy_win_counts, 'daily_winners': daily_winners}
                 
                 annual_ideal_imp_cost = np.sum(ideal_costs)
                 annual_ideal_exp_rev = np.sum(ideal_exp_rev)
@@ -780,7 +802,7 @@ class HomeBatteryCalculatorApp:
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': True
                 })
 
-                for strat_idx in range(5):
+                for strat_idx in range(6):
                     strategy = all_strategies[strat_idx]
                     imports, exports, soc, is_arb = _run_dynamic_simulation_from_arrays(
                         orig_imports, orig_exports, hours_array, months_array, day_ids,
@@ -818,11 +840,11 @@ class HomeBatteryCalculatorApp:
                     })
 
                 # Ideal Daily Adaptive for Dynamic (Pure Numba JIT)
-                ideal_imp, ideal_exp, ideal_soc, ideal_costs, ideal_exp_rev, win_counts = _calc_ideal_daily_adaptive(
+                ideal_imp, ideal_exp, ideal_soc, ideal_costs, ideal_exp_rev, win_counts, daily_winners = _calc_ideal_daily_adaptive(
                     costs_matrix, exp_rev_matrix, imports_matrix, exports_matrix, soc_matrix, day_ids
                 )
-                strategy_win_counts = {all_strategies[i]: int(win_counts[i]) for i in range(5)}
-                detailed_results[tid]['ideal-daily-adaptive'] = {'import': ideal_imp, 'export': ideal_exp, 'soc': ideal_soc, 'win_counts': strategy_win_counts}
+                strategy_win_counts = {all_strategies[i]: int(win_counts[i]) for i in range(6)}
+                detailed_results[tid]['ideal-daily-adaptive'] = {'import': ideal_imp, 'export': ideal_exp, 'soc': ideal_soc, 'win_counts': strategy_win_counts, 'daily_winners': daily_winners}
                 
                 annual_ideal_imp_cost = np.sum(ideal_costs)
                 annual_ideal_exp_rev = np.sum(ideal_exp_rev)
@@ -963,7 +985,7 @@ class HomeBatteryCalculatorApp:
         
         for idx, row in self.leaderboard_data.iterrows():
             tags = ('best_baseline',) if row['Strategy'] == 'baseline-no-battery' else ()
-            self.tree.insert("", "end", values=(
+            self.tree.insert("", "end", iid=str(idx), values=(
                 idx + 1, row['Supplier'], row['Tariff'], str(row['Strategy']).replace('-', ' ').title(), row['Arbitrage'], 
                 f"{row['Imp_kWh']:,.0f}", f"{row['Exp_kWh']:,.0f}", 
                 f"€ {row['Import']:,.2f}", f"€ {row['Export']:,.2f}",
@@ -1030,7 +1052,12 @@ class HomeBatteryCalculatorApp:
             
             sim_data = self.detailed_results.get(tab_ui['internal_id'], {}).get(tab_ui['strategy'])
             if sim_data:
-                ChartManager.render_daily_chart(tab_ui['fig'], tab_ui['ax1'], tab_ui['ax2'], tab_ui['canvas'], self.df_hdf, sim_data, target_date)
+                if tab_ui['strategy'] == 'ideal-daily-adaptive' and 'daily_winners' in sim_data:
+                    all_strategies = ['self-consumption', 'import-minimiser', 'export-maximiser', 'balanced-export-maximiser', 'import-minimiser-summer-pass', 'import-only-no-pv']
+                    ChartManager.render_adaptive_heatmap(tab_ui['fig'], tab_ui['ax1'], tab_ui['ax2'], tab_ui['canvas'], sim_data['daily_winners'], all_strategies, self.unique_dates)
+                    tab_ui['lbl_date'].configure(text="Annual View: Strategy Map")
+                else:
+                    ChartManager.render_daily_chart(tab_ui['fig'], tab_ui['ax1'], tab_ui['ax2'], tab_ui['canvas'], self.df_hdf, sim_data, target_date)
 
     def export_leaderboard(self):
         if self.leaderboard_data is None or self.leaderboard_data.empty:

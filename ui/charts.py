@@ -112,3 +112,61 @@ class ChartManager:
         ax1.legend(l1 + l2, lab1 + lab2, loc="upper right", fontsize=8, facecolor=colors['ax_bg'], edgecolor=colors['grid_color'], labelcolor=colors['text_color'])
         fig.tight_layout()
         canvas.draw()
+
+    @classmethod
+    def render_adaptive_heatmap(cls, fig, ax1, ax2, canvas, daily_winners, all_strategies, unique_dates):
+        if not HAS_MATPLOTLIB or daily_winners is None or not len(unique_dates):
+            return
+            
+        ax1.clear(); ax2.clear()
+        colors = cls.get_theme_colors()
+        fig.patch.set_facecolor(colors['fig_bg'])
+        cls.apply_theme_to_axis(ax1, colors)
+        
+        # Hide the second axis since we don't need it
+        ax2.set_visible(False)
+        
+        # Plot a scatter of the winning strategies
+        days = np.arange(len(daily_winners))
+        
+        # Map colors for each strategy
+        strat_colors = ["#475569", "#ef4444", "#eab308", "#f97316", "#3b82f6", "#10b981"]
+        
+        for i, strat in enumerate(all_strategies):
+            mask = (daily_winners == i)
+            if np.any(mask):
+                ax1.scatter(days[mask], daily_winners[mask], color=strat_colors[i % len(strat_colors)], label=strat.replace('-', ' ').title(), s=20)
+                
+        # Format axes
+        ax1.set_yticks(range(len(all_strategies)))
+        ax1.set_yticklabels([s.replace('-', ' ').title() for s in all_strategies], fontsize=8)
+        ax1.set_title("Annual Distribution of Winning Strategies (Ideal Adaptive)", fontsize=11, fontweight="bold", color=colors['text_color'])
+        
+        # Add month boundaries as vertical lines and setup X-axis labels
+        if len(unique_dates) == len(days):
+            months = np.array([d.month for d in unique_dates])
+            month_starts = np.where(months[:-1] != months[1:])[0] + 1
+            
+            # Calculate midpoints for month labels
+            all_starts = np.insert(month_starts, 0, 0)
+            midpoints = []
+            labels = []
+            for i in range(len(all_starts)):
+                start = all_starts[i]
+                end = all_starts[i+1] if i+1 < len(all_starts) else len(days)
+                midpoints.append((start + end) / 2)
+                labels.append(MONTH_NAMES[months[start]-1][:3])
+                
+            for ms in month_starts:
+                ax1.axvline(x=ms, color=colors['grid_color'], linestyle=":", alpha=0.5)
+                
+            ax1.set_xticks(midpoints)
+            ax1.set_xticklabels(labels, fontsize=9)
+            ax1.set_xlabel("Month of Year")
+        else:
+            ax1.set_xlabel("Day of Year")
+                
+        ax1.grid(True, axis='y', linestyle="--", alpha=0.3, color=colors['grid_color'])
+        ax1.legend(loc="upper right", bbox_to_anchor=(1.0, 1.15), ncol=3, fontsize=8, facecolor=colors['ax_bg'], edgecolor=colors['grid_color'], labelcolor=colors['text_color'])
+        fig.tight_layout()
+        canvas.draw()

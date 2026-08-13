@@ -7,8 +7,9 @@ from core.models import DualTariffResult
 
 def generate_html_report(leaderboard_df: pd.DataFrame, winning_row: pd.Series, 
                          params_dict: Dict[str, Any], roi_dict: Dict[str, Any], 
-                         dual_results: List[DualTariffResult],
-                         mprn: str, meter_serial: str, output_filepath: str) -> str:
+                         dual_results: Optional[List[DualTariffResult]] = None,
+                         mprn: str = "00000000000", meter_serial: str = "00000000", 
+                         output_filepath: str = "battery_optimization_report.html") -> str:
     """Generates an HTML Audit Summary Report for saving or printing to PDF."""
     
     top_5_df = leaderboard_df.head(5)
@@ -46,8 +47,9 @@ def generate_html_report(leaderboard_df: pd.DataFrame, winning_row: pd.Series,
     else:
         dual_rows_html = "<tr><td colspan='8' style='text-align: center; color: #94a3b8;'>No seasonal dual-tariff combinations evaluated.</td></tr>"
 
-    winning_tariff_name = winning_row.get('Tariff', winning_row.get('Tariff name', 'Standard Tariff'))
-    winning_strategy_name = str(winning_row.get('Strategy', 'Self Consumption')).replace('-', ' ').title()
+    winning_supplier_name = winning_row.get('Supplier', 'Unknown') if hasattr(winning_row, 'get') else str(winning_row['Supplier'])
+    winning_tariff_name = winning_row.get('Tariff', winning_row.get('Tariff name', 'Standard Tariff')) if hasattr(winning_row, 'get') else 'Standard Tariff'
+    winning_strategy_name = str(winning_row.get('Strategy', 'Self Consumption') if hasattr(winning_row, 'get') else winning_row['Strategy']).replace('-', ' ').title()
     
     report_html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -103,7 +105,7 @@ def generate_html_report(leaderboard_df: pd.DataFrame, winning_row: pd.Series,
     <div class="kpi-box">
         <div class="kpi-title">Optimal Annual Savings Opportunity</div>
         <div class="kpi-val">€{roi_dict.get('annual_savings', 0.0):,.2f} / yr</div>
-        <div style="font-size: 13px; color: #166534;">Winning Tariff: <strong>{winning_row['Supplier']} - {winning_tariff_name}</strong> ({winning_strategy_name})</div>
+        <div style="font-size: 13px; color: #166534;">Winning Tariff: <strong>{winning_supplier_name} - {winning_tariff_name}</strong> ({winning_strategy_name})</div>
     </div>
 
     <div class="grid">
