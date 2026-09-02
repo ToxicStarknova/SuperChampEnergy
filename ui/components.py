@@ -133,7 +133,7 @@ class FinancialROIDialog:
         
         self.dlg = ctk.CTkToplevel(self.parent)
         self.dlg.title("Financial ROI & Payback Configuration")
-        self.dlg.geometry("480x420")
+        self.dlg.geometry("480x470")
         self.dlg.grab_set()
         
         self._build_ui()
@@ -159,7 +159,10 @@ class FinancialROIDialog:
         ctk.CTkLabel(frame, text="Battery Degradation (%/yr):").grid(row=5, column=0, sticky=tk.W, pady=6)
         self.ent_degradation = ctk.CTkEntry(frame, width=120); self.ent_degradation.insert(0, str(self.roi_params.get('annual_degradation_pct', 2.0))); self.ent_degradation.grid(row=5, column=1, sticky=tk.W, pady=6)
 
-        ctk.CTkButton(frame, text="Update Financial Model", fg_color="#4f46e5", hover_color="#4338ca", command=self._save_roi).grid(row=6, column=0, columnspan=2, pady=20, sticky=tk.EW)
+        ctk.CTkLabel(frame, text="Discount Rate (%/yr):").grid(row=6, column=0, sticky=tk.W, pady=6)
+        self.ent_discount = ctk.CTkEntry(frame, width=120); self.ent_discount.insert(0, str(self.roi_params.get('discount_rate_pct', 5.0))); self.ent_discount.grid(row=6, column=1, sticky=tk.W, pady=6)
+
+        ctk.CTkButton(frame, text="Update Financial Model", fg_color="#4f46e5", hover_color="#4338ca", command=self._save_roi).grid(row=7, column=0, columnspan=2, pady=20, sticky=tk.EW)
 
     def _save_roi(self):
         try:
@@ -168,7 +171,8 @@ class FinancialROIDialog:
                 'inverter_capex': float(self.ent_inverter.get()),
                 'grant_amount': float(self.ent_grant.get()),
                 'electricity_inflation_pct': float(self.ent_inflation.get()),
-                'annual_degradation_pct': float(self.ent_degradation.get())
+                'annual_degradation_pct': float(self.ent_degradation.get()),
+                'discount_rate_pct': float(self.ent_discount.get())
             }
             self.on_update_callback(updated)
             messagebox.showinfo("Success", "Financial ROI parameters updated.", parent=self.dlg)

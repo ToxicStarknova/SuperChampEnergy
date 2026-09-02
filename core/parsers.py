@@ -23,8 +23,12 @@ def parse_hdf(file_path: str) -> Tuple[pd.DataFrame, str, str]:
     
     mprn_col = next((c for c in df_raw.columns if 'mprn' in c.lower()), None)
     meter_col = next((c for c in df_raw.columns if 'serial' in c.lower()), None)
-    mprn_val = str(df_raw[mprn_col].dropna().iloc[0]) if mprn_col and not df_raw[mprn_col].empty else "00000000000"
-    meter_val = str(df_raw[meter_col].dropna().iloc[0]) if meter_col and not df_raw[meter_col].empty else "00000000"
+    mprn_val = "00000000000"
+    if mprn_col and not df_raw[mprn_col].dropna().empty:
+        mprn_val = str(df_raw[mprn_col].dropna().iloc[0])
+    meter_val = "00000000"
+    if meter_col and not df_raw[meter_col].dropna().empty:
+        meter_val = str(df_raw[meter_col].dropna().iloc[0])
 
     date_col = next((c for c in df_raw.columns if 'read date' in c.lower()), None)
     type_col = next((c for c in df_raw.columns if 'read type' in c.lower()), None)
@@ -33,7 +37,12 @@ def parse_hdf(file_path: str) -> Tuple[pd.DataFrame, str, str]:
     if not date_col or not type_col or not val_col:
         raise ValueError("Invalid HDF file structure: Required columns 'Read Date', 'Read Type', or 'Read Value' missing.")
 
-    df_raw['timestamp'] = pd.to_datetime(df_raw[date_col].astype(str).str.replace('"', ''), format='mixed', dayfirst=True)
+    cleaned_dates = df_raw[date_col].astype(str).str.replace('"', '').str.strip()
+    try:
+        df_raw['timestamp'] = pd.to_datetime(cleaned_dates, format='%d/%m/%Y %H:%M')
+    except Exception:
+        df_raw['timestamp'] = pd.to_datetime(cleaned_dates, format='mixed', dayfirst=True)
+
     df_raw['timestamp'] = df_raw['timestamp'] - pd.Timedelta(minutes=30)
     df_raw[val_col] = pd.to_numeric(df_raw[val_col], errors='coerce')
     
@@ -146,8 +155,13 @@ def get_half_hourly_rates_for_row(row: pd.Series, date_range: pd.DatetimeIndex) 
         if pd.notna(raw_ev_overage) and str(raw_ev_overage).strip() != "":
             ev_overage_rate = float(raw_ev_overage) / 100.0
             has_overage_penalty = True
+        elif ev_rate is not None:
+            # When EV rate is present but no explicit overage is populated in CSV,
+            # utility contracts revert overage to the standard Day unit rate
+            ev_overage_rate = day_rate
+            has_overage_penalty = True
         else:
-            ev_overage_rate = ev_rate if ev_rate is not None else day_rate
+            ev_overage_rate = day_rate
             has_overage_penalty = False
     except (ValueError, TypeError):
         ev_overage_rate = day_rate

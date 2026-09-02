@@ -90,6 +90,7 @@ class ChartManager:
         orig_exp = df_hdf['generation'].values[mask] * 2.0
 
         ax1.clear(); ax2.clear()
+        ax2.set_visible(True)
         colors = cls.get_theme_colors()
         
         fig.patch.set_facecolor(colors['fig_bg'])

@@ -1,4 +1,4 @@
-# Home Battery & Tariff Optimizer (V2.5 Professional)
+# Home Battery & Tariff Optimizer (V2.6 Professional)
 
 A high-performance Python desktop application built using **CustomTkinter**, **Pandas**, **NumPy**, **Numba**, and **Matplotlib** to model home battery performance, evaluate dispatch strategies, and compare electricity tariffs.
 
@@ -11,18 +11,20 @@ The application parses ESB Networks HDF (Harmonised Data Files) containing 30-mi
 
 ## Key Features
 
-* ⚡ **Ultra-Fast Numba JIT Engine (~125ms Execution):** Simulates 370+ annual battery charge/discharge runs across 30-minute interval readings in **~125 milliseconds (~0.12s)** using pure C-speed Numba `@njit(fastmath=True)` array kernels.
-* 🎛️ **Hardware Sensitivity & Expansion Matrix:** Models 30 hardware scenarios (5 Battery Additions: +0 to +20 kWh x 6 Solar PV Scalings: 100% to 200%) in **~60ms** to evaluate the financial payback of expanding system capacity.
-* 📊 **10-Year NPV & ROI Financial Projections:** Computes Net Present Value (NPV €) and Return on Investment (ROI %) across a 10-year horizon for all 30 expansion scenarios, accounting for 3% electricity price inflation, 2% hardware degradation, and a 5% discount rate.
+* ⚡ **Ultra-Fast Numba JIT Engine (~125ms Execution):** Simulates 370+ annual battery charge/discharge runs across 30-minute interval readings in **~125 milliseconds (~0.12s)** using pure C-speed Numba `@njit(fastmath=True)` array kernels. Compatible with modern Python (including Python 3.13 and Numba 0.60+).
+* 🔄 **Seasonal Dual-Tariff Switcher Analysis:** Evaluates contract switching between an optimal Winter Tariff (cheap night rates for home heating) and Summer Tariff (high FIT export rates for excess solar), using actual interval-level seasonal net energy calculations and factoring in contract exit cancellation fees and welcome bonus clawback settings.
+* 🎛️ **Hardware Sensitivity & Expansion Matrix:** Models 30 hardware scenarios (5 Battery Additions: +0 to +20 kWh x 6 Solar PV Scalings: 100% to 200%) in **~60ms** to evaluate the financial payback of expanding system capacity. Dynamically recalculates battery reserve limits for expanded capacities and synthesizes solar curves for sites without existing PV.
+* 🔌 **Physical Inverter Dispatch Coordination:** Dynamically coordinates inverter headroom across solar charging, grid force-charging, and home discharge, ensuring physical charge and discharge rate limits are never exceeded. Protects flat 24h tariffs from 24/7 force-charging.
+* 📊 **10-Year NPV & ROI Financial Projections:** Computes Net Present Value (NPV €) and Return on Investment (ROI %) across a 10-year horizon for all 30 expansion scenarios, accounting for electricity price inflation, hardware degradation, and user-configurable discount rates.
 * 🏆 **Automated Sweet Spot Payback Detection:** Automatically calculates CapEx investment, annual incremental savings, simple payback horizon, 10-year NPV, and 10-year ROI % to identify the single most cost-effective system expansion.
 * 🔥 **Module-Level Startup Warm-Up:** Pre-compiles Numba LLVM routines on module import to completely eliminate first-run JIT latency during user optimization sweeps.
-* 🔄 **Non-Blocking Multithreaded GUI:** Runs optimization sweeps in a background thread to keep the CustomTkinter user interface smooth and responsive with real-time console telemetry updates.
-* 🧠 **Oracle EMS Ideal Daily Adaptive Strategy:** Automatically selects the optimal daily strategy across the entire year using pure Numba vector array logic.
+* 🔄 **Non-Blocking Multithreaded GUI:** Runs optimization sweeps in a background thread to keep the CustomTkinter user interface smooth and responsive with real-time console telemetry updates. Sorting columns in the table never desynchronizes the optimal plan winner cards or exported reports.
+* 🧠 **Oracle EMS Ideal Daily Adaptive Strategy:** Automatically selects the optimal daily strategy across the entire year using pure Numba vector array logic with energy-conserving SoC tracking across midnight boundaries.
 * 💰 **Financial Payback & ROI Calculator:** Models equipment CAPEX, government/SEAI grants, electricity price inflation, and 10-year battery capacity degradation curves to project Net Present Value (NPV), Simple Payback Period (years), and 10-Year ROI %.
 * 📄 **Interactive HTML Audit Report Export:** Generates formatted HTML audit summary reports complete with hardware parameters, winning tariff breakdowns, 10-year cash flow tables, and leaderboard rankings.
-* 📊 **Dynamic Wholesale (DAM) Tariff Modeling:** Integrates Day-Ahead Market (DAM) wholesale hourly pricing and supplier adders, applying 9% Irish VAT to dynamic import tariffs.
-* 🚘 **EV Tariff Cap Modeling:** Models bi-monthly promotional caps (e.g. 1,000 kWh limit on cheap EV night rates) and alerts users if thresholds are exceeded.
-* 📥 **Simulated HDF Export:** Exports simulated battery import/export profiles back into the ESB HDF format for compatibility with external comparison platforms like EnergyPal.ie.
+* 📊 **Dynamic Wholesale (DAM) Tariff Modeling:** Integrates Day-Ahead Market (DAM) wholesale hourly pricing and supplier adders, applying 9% Irish VAT to dynamic import tariffs. Pre-populates sample wholesale datasets automatically.
+* 🚘 **EV Tariff Cap Modeling:** Models bi-monthly promotional caps (e.g. 1,000 kWh limit on cheap EV night rates, reverting overage to the standard Day unit rate) and alerts users if thresholds are exceeded.
+* 📥 **Simulated HDF & CSV Export:** Exports simulated battery import/export profiles back into the ESB HDF format for compatibility with external comparison platforms like EnergyPal.ie, as well as numbered CSV leaderboard tables.
 
 ---
 
@@ -67,10 +69,11 @@ SuperChampEnergy/
 │   ├── hardware_matrix_dialog.py # 5x6 Hardware Sensitivity Matrix dialog with 10-Yr NPV & ROI
 │   └── charts.py                 # Matplotlib figures & dark/light theme manager
 ├── HDF_calckWh_SAMPLE_23-06-2025.csv             # Sample smart meter interval readings
-├── energypal tarriffs 03072026.csv             # Sample tariff database
+├── energypal tarriffs 03072026.csv               # Sample tariff database
 ├── Dynamic tarrif supplier fixed costs_260626.csv # Sample dynamic supplier costs
-├── DAM prices MAy 2026.csv                        # Sample Day-Ahead Market prices
-└── Super_Champ_Optimizer.py                       # Main application launcher entrypoint
+├── DAM prices MAy 2026.csv                       # Sample Day-Ahead Market prices
+├── requirements.txt                              # Python dependencies
+└── Super_Champ_Optimizer.py                      # Main application launcher entrypoint
 ```
 
 ---
@@ -84,9 +87,9 @@ SuperChampEnergy/
    ```
 
 2. **Install required dependencies:**
-   Python 3.8+ is required. Install the necessary libraries:
+   Python 3.9+ is recommended. Install requirements:
    ```bash
-   pip install pandas numpy numba matplotlib customtkinter
+   pip install -r requirements.txt
    ```
 
 3. **Run the application:**
@@ -99,17 +102,19 @@ SuperChampEnergy/
 ## How to Use
 
 1. **Select Source Files:**
-   - **ESB HDF:** Select your ESB HDF CSV file (or use `HDF_calckWh_SAMPLE_23-06-2025.csv`).
-   - **Tariff DB:** Select a tariff spreadsheet database (such as `energypal tarriffs 03072026.csv`), or click **+ Create Custom Tariff** to add manual rates.
-   - **DAM & Dynamic Adders (Optional):** Load Day-Ahead Market prices (`DAM prices MAy 2026.csv`) and Dynamic Supplier costs (`Dynamic tarrif supplier fixed costs_260626.csv`).
+   - **ESB HDF:** Select your ESB HDF CSV file (default: `HDF_calckWh_SAMPLE_23-06-2025.csv`).
+   - **Tariff DB:** Select a tariff spreadsheet database (default: `energypal tarriffs 03072026.csv`), or click **+ Create Custom Tariff** to add manual rates.
+   - **DAM & Dynamic Adders:** Automatically pre-populates Day-Ahead Market prices (`DAM prices MAy 2026.csv`) and Dynamic Supplier costs (`Dynamic tarrif supplier fixed costs_260626.csv`).
 2. **Hardware & Grid Settings:** Enter your battery capacity (kWh), inverter charge rate (kW), SoC bounds (%), round-trip efficiency (%), and MIC/MEC grid limits.
-3. **Financial ROI Setup (Optional):** Click **⚙️ Financial ROI Setup** in the top header to enter equipment CAPEX, SEAI grant amounts, and electricity inflation expectations.
+3. **Financial ROI Setup (Optional):** Click **⚙️ Financial ROI Setup** in the top header to enter equipment CAPEX, SEAI grant amounts, discount rates, and electricity inflation expectations.
 4. **Hardware Sensitivity Matrix:** Click **⚡ Hardware Matrix** to open the 5x6 sensitivity matrix grid. Customize `Battery €/kWh` and `PV €/kWp` CapEx parameters to calculate payback, **10-Year NPV (€)**, and **10-Year ROI (%)**.
-5. **Run Optimization:** Click **Run Optimization Sweep** to compute and display results in real time.
-6. **Export & Report:** Click **📄 Export HTML Report** to save a complete audit summary report, or **⬇ Export Table to CSV** to save leaderboard results.
+5. **Seasonal Dual-Tariff Analysis:** Click **🔄 Seasonal Dual-Tariff** to evaluate switching between winter and summer tariffs with configurable exit fees and bonus clawback settings.
+6. **Run Optimization:** Click **Run Optimization Sweep** to compute and display results in real time.
+7. **Export & Report:** Click **📄 Export HTML Report** to save a complete audit summary report, or **⬇ Export Table to CSV** to save leaderboard results.
 
 ---
 
 ## Disclaimer
 
 This tool is designed for estimation and comparison purposes. Actual household battery performance and utility bills may vary based on weather variations, consumption habits, and utility pricing updates.
+

@@ -43,7 +43,7 @@ class FinancialROIParams:
     inverter_capex: float = 1500.0
     grant_amount: float = 2100.0  # e.g., SEAI grant in Ireland
     electricity_inflation_pct: float = 3.0
-    discount_rate_pct: float = 4.0
+    discount_rate_pct: float = 5.0
     annual_degradation_pct: float = 2.0
     horizon_years: int = 10
 
@@ -58,6 +58,7 @@ class DualTariffParams:
     num_switches_per_year: int = 2     # Spring & Autumn switches
     winter_months: List[int] = field(default_factory=lambda: [11, 12, 1, 2, 3])  # Nov - Mar (5 months)
     summer_months: List[int] = field(default_factory=lambda: [4, 5, 6, 7, 8, 9, 10]) # Apr - Oct (7 months)
+    include_welcome_bonus: bool = False  # Welcome bonuses are usually forfeited/clawed back on early exit
 
     @property
     def total_annual_fees(self) -> float:
@@ -85,14 +86,27 @@ class FinancialROICalculator:
     @staticmethod
     def calculate_roi(annual_savings_year1: float, params: FinancialROIParams) -> Dict[str, Any]:
         net_inv = params.net_investment
-        if net_inv <= 0 or annual_savings_year1 <= 0:
+        if annual_savings_year1 <= 0:
             return {
-                'net_investment': net_inv,
+                'net_investment': round(net_inv, 2),
+                'payback_years': 99.0,
+                'ten_year_savings': 0.0,
+                'ten_year_net_savings': round(-net_inv, 2),
+                'roi_percent': -100.0 if net_inv > 0 else 0.0,
+                'npv': round(-net_inv, 2),
+                'yearly_cash_flows': [0.0] * params.horizon_years
+            }
+
+        if net_inv <= 0:
+            ten_yr = annual_savings_year1 * params.horizon_years
+            return {
+                'net_investment': 0.0,
                 'payback_years': 0.0,
-                'ten_year_net_savings': annual_savings_year1 * params.horizon_years,
+                'ten_year_savings': round(ten_yr, 2),
+                'ten_year_net_savings': round(ten_yr, 2),
                 'roi_percent': 0.0,
-                'npv': 0.0,
-                'yearly_cash_flows': [annual_savings_year1] * params.horizon_years
+                'npv': round(ten_yr, 2),
+                'yearly_cash_flows': [round(annual_savings_year1, 2)] * params.horizon_years
             }
 
         simple_payback = net_inv / annual_savings_year1 if annual_savings_year1 > 0 else 99.0

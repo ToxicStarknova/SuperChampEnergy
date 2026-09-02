@@ -36,32 +36,43 @@ class DualTariffDialog:
         self.ent_fee.insert(0, str(self.current_params.exit_fee_per_switch))
         self.ent_fee.grid(row=2, column=1, sticky=tk.W, pady=6)
 
-        ctk.CTkButton(header, text="Re-evaluate Dual-Tariffs", fg_color="#4f46e5", hover_color="#4338ca", command=self._recalculate).grid(row=2, column=2, padx=15, pady=6)
+        self.chk_bonus = ctk.CTkCheckBox(header, text="Include Cash Bonuses (Warning: usually clawed back on early exit)")
+        if self.current_params.include_welcome_bonus:
+            self.chk_bonus.select()
+        else:
+            self.chk_bonus.deselect()
+        self.chk_bonus.grid(row=2, column=2, padx=15, pady=6, sticky=tk.W)
+
+        ctk.CTkButton(header, text="Re-evaluate Dual-Tariffs", fg_color="#4f46e5", hover_color="#4338ca", command=self._recalculate).grid(row=2, column=3, padx=15, pady=6)
 
         # Table Container
         table_frame = ctk.CTkFrame(self.dlg, corner_radius=8)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 15))
 
-        cols = ("rank", "winter", "w_strat", "summer", "s_strat", "fees", "bill", "savings")
+        cols = ("rank", "winter", "w_strat", "w_cost", "summer", "s_strat", "s_cost", "fees", "bill", "savings")
         self.tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="none")
         
         self.tree.heading("rank", text="#")
         self.tree.heading("winter", text="Winter Plan (Nov-Mar)")
         self.tree.heading("w_strat", text="Winter Strategy")
+        self.tree.heading("w_cost", text="Winter Cost")
         self.tree.heading("summer", text="Summer Plan (Apr-Oct)")
         self.tree.heading("s_strat", text="Summer Strategy")
+        self.tree.heading("s_cost", text="Summer Cost")
         self.tree.heading("fees", text="Exit Fees")
         self.tree.heading("bill", text="Net Annual Bill")
         self.tree.heading("savings", text="Net Extra Profit")
 
         self.tree.column("rank", width=35, anchor=tk.CENTER)
-        self.tree.column("winter", width=220, anchor=tk.W)
-        self.tree.column("w_strat", width=140, anchor=tk.CENTER)
-        self.tree.column("summer", width=220, anchor=tk.W)
-        self.tree.column("s_strat", width=140, anchor=tk.CENTER)
-        self.tree.column("fees", width=80, anchor=tk.E)
-        self.tree.column("bill", width=110, anchor=tk.E)
-        self.tree.column("savings", width=110, anchor=tk.E)
+        self.tree.column("winter", width=190, anchor=tk.W)
+        self.tree.column("w_strat", width=130, anchor=tk.CENTER)
+        self.tree.column("w_cost", width=85, anchor=tk.E)
+        self.tree.column("summer", width=190, anchor=tk.W)
+        self.tree.column("s_strat", width=130, anchor=tk.CENTER)
+        self.tree.column("s_cost", width=85, anchor=tk.E)
+        self.tree.column("fees", width=75, anchor=tk.E)
+        self.tree.column("bill", width=100, anchor=tk.E)
+        self.tree.column("savings", width=105, anchor=tk.E)
 
         self.tree.tag_configure('profitable', background='#e6f4ea', foreground='#137333')
 
@@ -82,7 +93,8 @@ class DualTariffDialog:
             savings_str = f"+ €{res.extra_savings_vs_single_best:,.2f}" if res.extra_savings_vs_single_best > 0 else f"€{res.extra_savings_vs_single_best:,.2f}"
             
             self.tree.insert("", "end", values=(
-                idx + 1, w_name, res.winter_strategy, s_name, res.summer_strategy,
+                idx + 1, w_name, res.winter_strategy, f"€{res.winter_cost:,.2f}",
+                s_name, res.summer_strategy, f"€{res.summer_cost:,.2f}",
                 f"€{res.total_exit_fees:,.2f}", f"€{res.net_annual_bill:,.2f}", savings_str
             ), tags=tags)
 
@@ -90,6 +102,7 @@ class DualTariffDialog:
         try:
             fee = float(self.ent_fee.get())
             self.current_params.exit_fee_per_switch = fee
+            self.current_params.include_welcome_bonus = bool(self.chk_bonus.get())
             self.dual_results = self.on_recalculate_callback(self.current_params)
             self._populate_table()
         except ValueError:

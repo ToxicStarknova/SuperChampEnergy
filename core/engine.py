@@ -73,7 +73,7 @@ def _fast_simulate(consumptions: np.ndarray, generations: np.ndarray, hours: np.
 
     for i in range(n):
         hour, month = hours[i], months[i]
-        is_heating_season = (month in [11, 12, 1, 2])
+        is_heating_season = (month == 11 or month == 12 or month == 1 or month == 2)
         is_summer = not is_heating_season
         home_demand, solar_gen = consumptions[i], generations[i]
         
@@ -85,8 +85,9 @@ def _fast_simulate(consumptions: np.ndarray, generations: np.ndarray, hours: np.
         remaining_demand, excess_solar = home_demand - self_consumption, solar_gen - self_consumption
         grid_import, grid_export = remaining_demand, 0.0
         
-        # Track total battery discharge energy in this 30-min window (capped by inverter half_hour_charge_limit)
+        # Track battery charge and discharge in this 30-min window (capped by inverter half_hour_charge_limit)
         interval_discharge_kwh = 0.0
+        interval_charge_kwh = 0.0
 
         # Step 1: Discharging battery for home consumption (when not force-charging)
         if not is_force_charge_hour:
@@ -115,6 +116,7 @@ def _fast_simulate(consumptions: np.ndarray, generations: np.ndarray, hours: np.
                 if charge_from_solar > 0.001:
                     battery_soc += charge_from_solar * solar_charge_efficiency
                     grid_export += (excess_solar - charge_from_solar)
+                    interval_charge_kwh += charge_from_solar
                 else:
                     grid_export += excess_solar
                     
@@ -135,17 +137,19 @@ def _fast_simulate(consumptions: np.ndarray, generations: np.ndarray, hours: np.
                         grid_export += energy_to_discharge
                         interval_discharge_kwh += energy_to_discharge
                         
-            # Force Charging from Grid
+            # Force Charging from Grid (coordinated with solar charging headroom)
             if is_force_charge_hour:
                 space_in_battery = max(0.0, max_soc_kwh - battery_soc)
-                charge_power = min(charge_rate_limit, mic)
-                energy_to_charge = min(max(0.0, charge_power * 0.5), space_in_battery / grid_efficiency_sqrt)
+                allowed_grid_charge = max(0.0, half_hour_charge_limit - interval_charge_kwh)
+                charge_power = min(allowed_grid_charge, mic * 0.5)
+                energy_to_charge = min(charge_power, space_in_battery / grid_efficiency_sqrt)
                 max_allowed_home_import = max(0.0, mic * 0.5 - energy_to_charge)
                 grid_import = min(grid_import, max_allowed_home_import)
                 
                 if energy_to_charge > 0.001:
                     battery_soc += energy_to_charge * grid_efficiency_sqrt
                     grid_import += energy_to_charge
+                    interval_charge_kwh += energy_to_charge
                     
         # Apply MEC Grid Export Cap
         if grid_export / 0.5 > mec:
@@ -178,12 +182,22 @@ def _run_simulation_from_arrays(consumption: np.ndarray, generation: np.ndarray,
     """Pure Numba JIT array-based kernel for fixed rate battery simulation."""
     grid_efficiency_sqrt = np.sqrt(grid_rte)
     
-    force_charge_mask = force_charge_hours_24[hour_array]
+    # Check if all 24 hours are flagged for force-charging (e.g. flat tariff)
+    all_fc = True
+    for h in range(24):
+        if not force_charge_hours_24[h]:
+            all_fc = False
+            break
+
+    if all_fc:
+        force_charge_mask = np.zeros(len(hour_array), dtype=np.bool_)
+    else:
+        force_charge_mask = force_charge_hours_24[hour_array]
     
     pre_charge_hours = np.zeros(24, dtype=np.bool_)
     if strategy_id == 2 or strategy_id == 3:
         for h in range(24):
-            if force_charge_hours_24[h]:
+            if force_charge_hours_24[h] and not all_fc:
                 for offset in range(1, 5): 
                     pre_charge_hours[(h - offset) % 24] = True
     pre_charge_mask = pre_charge_hours[hour_array]
@@ -412,18 +426,22 @@ def evaluate_dual_tariffs(df_res: pd.DataFrame, df_hdf: pd.DataFrame,
         
         for _, row in sub_rows.iterrows():
             strat = row['Strategy']
-            # Reconstruct net monthly sums for winter vs summer
-            # Import cost - Export revenue during winter
-            # We approximate winter/summer net from row data proportional to energy sums
-            imp_cost = row['Import']
-            exp_rev = row['Export']
-            
-            # Weighted seasonal split
-            winter_ratio = np.sum(winter_mask) / len(winter_mask)
-            summer_ratio = np.sum(summer_mask) / len(summer_mask)
-            
-            c_winter = (imp_cost - exp_rev) * winter_ratio + (row['Fixed'] * (num_winter_months / 12.0))
-            c_summer = (imp_cost - exp_rev) * summer_ratio + (row['Fixed'] * (num_summer_months / 12.0))
+            fixed_charge = float(row['Fixed'])
+            fixed_winter = fixed_charge * (num_winter_months / 12.0)
+            fixed_summer = fixed_charge * (num_summer_months / 12.0)
+
+            if 'Winter_Net' in row and 'Summer_Net' in row and not pd.isna(row['Winter_Net']):
+                # Exact seasonal energy net: import costs - export revenues for real seasonal intervals
+                c_winter = float(row['Winter_Net']) + fixed_winter
+                c_summer = float(row['Summer_Net']) + fixed_summer
+            else:
+                # Proportional fallback if seasonal net not precomputed
+                imp_cost = float(row['Import'])
+                exp_rev = float(row['Export'])
+                winter_ratio = np.sum(winter_mask) / max(1, len(winter_mask))
+                summer_ratio = np.sum(summer_mask) / max(1, len(summer_mask))
+                c_winter = (imp_cost - exp_rev) * winter_ratio + fixed_winter
+                c_summer = (imp_cost - exp_rev) * summer_ratio + fixed_summer
             
             if c_winter < winter_best_cost:
                 winter_best_cost = c_winter
@@ -450,8 +468,10 @@ def evaluate_dual_tariffs(df_res: pd.DataFrame, df_hdf: pd.DataFrame,
     
     for w in seasonal_tariff_profiles:
         for s in seasonal_tariff_profiles:
-            # Dual-tariff annual bill = Winter Cost + Summer Cost + Exit Fees - Cash Bonuses
-            net_bill = w['winter_cost'] + s['summer_cost'] + total_exit_fees - w['Bonus'] - s['Bonus']
+            # Dual-tariff annual bill = Winter Cost + Summer Cost + Exit Fees
+            net_bill = w['winter_cost'] + s['summer_cost'] + total_exit_fees
+            if getattr(dual_params, 'include_welcome_bonus', False):
+                net_bill -= (w['Bonus'] + s['Bonus'])
             extra_savings = single_best_bill - net_bill
             
             dual_results.append(DualTariffResult(
@@ -653,12 +673,27 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
     raw_results = []
     baseline_bill = 0.0
 
+    has_existing_pv = np.sum(orig_exports) > 1.0
+    if not has_existing_pv and expansion_params.baseline_pv_kwp > 0:
+        base_solar_profile = np.zeros(n_samples, dtype=np.float64)
+        for idx in range(n_samples):
+            h = hours_array[idx]
+            m = months_array[idx]
+            seasonal_factor = 0.5 + 0.5 * np.cos((m - 6) * 2.0 * np.pi / 12.0)
+            if 6 <= h <= 20:
+                daily_shape = np.sin((h - 6) * np.pi / 14.0) ** 2
+                gen_kwh = max(0.0, 0.8 * expansion_params.baseline_pv_kwp * seasonal_factor * daily_shape * 0.5)
+                base_solar_profile[idx] = max(0.0, gen_kwh - min(orig_imports[idx], gen_kwh * 0.4))
+    else:
+        base_solar_profile = orig_exports
+
     for batt_add in battery_additions:
         usable_cap = base_cap + batt_add
+        min_soc_scenario = usable_cap * (base_params.min_soc / 100.0)
         max_soc = usable_cap # 100% SoC upper bound
         
         for pv_scale in pv_scale_factors:
-            scaled_exports = orig_exports * pv_scale
+            scaled_exports = base_solar_profile * pv_scale
             
             best_scenario_bill = 1e9
             best_supplier = ""
@@ -671,7 +706,7 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
                     imp, exp, soc, _ = _run_simulation_from_arrays(
                         orig_imports, scaled_exports, hours_array, months_array,
                         ft['import_prices_arr'], ft['fit_rate'], ft['fc_24'], strat_idx,
-                        usable_cap, min_soc_kwh, max_soc, grid_rte, solar_charge_eff,
+                        usable_cap, min_soc_scenario, max_soc, grid_rte, solar_charge_eff,
                         charge_rate, mic, mec
                     )
                     costs, _ = _calc_cost_with_overage(
@@ -708,7 +743,7 @@ def run_hardware_expansion_matrix(df_hdf: pd.DataFrame, valid_tariffs: pd.DataFr
                     imp, exp, soc, _ = _run_dynamic_simulation_from_arrays(
                         orig_imports, scaled_exports, hours_array, months_array, day_ids,
                         dt['import_prices_arr'], dt['fit_rate_arr'], strat_idx,
-                        usable_cap, min_soc_kwh, max_soc, grid_rte, solar_charge_eff,
+                        usable_cap, min_soc_scenario, max_soc, grid_rte, solar_charge_eff,
                         charge_rate, mic, mec
                     )
                     costs, _ = _calc_cost_with_overage(

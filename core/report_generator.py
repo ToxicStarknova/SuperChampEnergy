@@ -14,10 +14,10 @@ def generate_html_report(leaderboard_df: pd.DataFrame, winning_row: pd.Series,
     
     top_5_df = leaderboard_df.head(5)
     top_5_rows_html = ""
-    for idx, row in top_5_df.iterrows():
+    for rank_idx, (_, row) in enumerate(top_5_df.iterrows(), 1):
         top_5_rows_html += f"""
         <tr>
-            <td style="text-align: center; font-weight: bold;">#{idx + 1}</td>
+            <td style="text-align: center; font-weight: bold;">#{rank_idx}</td>
             <td>{row['Supplier']}</td>
             <td>{row['Tariff']}</td>
             <td>{str(row['Strategy']).replace('-', ' ').title()}</td>

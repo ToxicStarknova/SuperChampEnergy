@@ -130,6 +130,10 @@ class HardwareMatrixDialog(ctk.CTkToplevel):
         baseline = next((r for r in self.results if r.is_baseline), None)
 
         if not sweet_spot or not baseline:
+            msg_frame = ctk.CTkFrame(self.kpi_frame, fg_color="#1e293b", corner_radius=8)
+            msg_frame.pack(fill="x", padx=4, pady=4)
+            ctk.CTkLabel(msg_frame, text="ℹ️ Current Hardware is Optimal — no expansion scenario produced faster payback.",
+                         font=ctk.CTkFont(size=11, weight="bold"), text_color="#38bdf8").pack(padx=12, pady=8)
             return
 
         # KPI 1: Sweet Spot Config

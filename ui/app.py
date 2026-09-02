@@ -38,8 +38,10 @@ class HomeBatteryCalculatorApp:
         
         self.hdf_path = tk.StringVar(value="HDF_calckWh_SAMPLE_23-06-2025.csv")
         self.tariff_path = tk.StringVar(value="energypal tarriffs 03072026.csv")
-        self.dam_path = tk.StringVar()
-        self.dynamic_adders_path = tk.StringVar()
+        dam_default = "DAM prices MAy 2026.csv" if os.path.exists("DAM prices MAy 2026.csv") else ""
+        dyn_default = "Dynamic tarrif supplier fixed costs_260626.csv" if os.path.exists("Dynamic tarrif supplier fixed costs_260626.csv") else ""
+        self.dam_path = tk.StringVar(value=dam_default)
+        self.dynamic_adders_path = tk.StringVar(value=dyn_default)
         
         self.leaderboard_data = None
         self.df_hdf = None 
@@ -59,6 +61,7 @@ class HomeBatteryCalculatorApp:
             'inverter_capex': 1500.0,
             'grant_amount': 2100.0,
             'electricity_inflation_pct': 3.0,
+            'discount_rate_pct': 5.0,
             'annual_degradation_pct': 2.0
         }
         self.dual_params = DualTariffParams()
@@ -445,22 +448,10 @@ class HomeBatteryCalculatorApp:
         l.sort(key=lambda t: clean_val(t[0]), reverse=reverse)
         tv.heading(col, command=lambda: self.treeview_sort_column(tv, col, not reverse))
 
-        # Re-sync leaderboard_data with treeview visual order
-        if self.leaderboard_data is not None and not self.leaderboard_data.empty:
-            try:
-                sorted_indices = [int(item[1]) for item in l]
-                if len(sorted_indices) == len(self.leaderboard_data):
-                    self.leaderboard_data = self.leaderboard_data.iloc[sorted_indices].reset_index(drop=True)
-                    self.populate_treeview()
-                    self.update_subtabs_from_leaderboard()
-            except (ValueError, IndexError, KeyError):
-                for index, (val, k) in enumerate(l):
-                    tv.move(k, '', index)
-                    tv.set(k, "rank", index + 1)
-        else:
-            for index, (val, k) in enumerate(l):
-                tv.move(k, '', index)
-                tv.set(k, "rank", index + 1)
+        # Reorder Treeview visually without mutating internal lowest-bill optimization data
+        for index, (val, k) in enumerate(l):
+            tv.move(k, '', index)
+            tv.set(k, "rank", index + 1)
 
     def browse_hdf(self):
         f = filedialog.askopenfilename(filetypes=[("HDF CSV", "*.csv")])
@@ -586,7 +577,7 @@ class HomeBatteryCalculatorApp:
                 for t in self.custom_tariffs: t['Supply Region'] = params.region
                 df_tariffs = pd.concat([df_tariffs, pd.DataFrame(self.custom_tariffs)], ignore_index=True)
 
-            valid_tariffs = df_tariffs[(df_tariffs['Supply Region'].str.lower() == params.region) & (df_tariffs['Plan type'].str.lower() != 'gas') & (df_tariffs['Plan type'].str.lower() != 'dynamic')]
+            valid_tariffs = df_tariffs[(df_tariffs['Supply Region'].str.lower().str.startswith(params.region)) & (df_tariffs['Plan type'].str.lower() != 'gas') & (df_tariffs['Plan type'].str.lower() != 'dynamic')]
 
             dam_prices_c_kwh, dynamic_suppliers = None, []
             if self.dam_path.get() and self.dynamic_adders_path.get():
@@ -623,6 +614,8 @@ class HomeBatteryCalculatorApp:
             mec = float(params.mec)
 
             mask_june, mask_dec = (months_array == 6), (months_array == 12)
+            mask_winter = np.isin(months_array, self.dual_params.winter_months)
+            mask_summer = np.isin(months_array, self.dual_params.summer_months)
             unique_dates = np.unique(dates_array)
             num_days = len(unique_dates)
             scaling_factor = 365.0 / num_days if num_days > 0 else 1.0
@@ -658,10 +651,12 @@ class HomeBatteryCalculatorApp:
                     
                 first_day_prices = import_prices_arr[:48]
                 min_p = np.min(first_day_prices)
-                force_charge_hours_24 = np.zeros(24, dtype=np.bool_)
-                for h in range(24):
-                    if first_day_prices[h*2] <= min_p + 0.001 or first_day_prices[h*2+1] <= min_p + 0.001:
-                        force_charge_hours_24[h] = True
+                fc_24 = np.zeros(24, dtype=np.bool_)
+                is_flat = (np.max(first_day_prices) - min_p) < 0.005
+                if not is_flat:
+                    for h in range(24):
+                        if first_day_prices[h*2] <= min_p + 0.001 or first_day_prices[h*2+1] <= min_p + 0.001:
+                            fc_24[h] = True
                 
                 tid = f"T_{int_id}"; int_id += 1
                 detailed_results[tid] = {'meta': row.to_dict()}
@@ -680,6 +675,8 @@ class HomeBatteryCalculatorApp:
                 base_imp_kwh, base_exp_kwh = np.sum(orig_imports), np.sum(orig_exports)
                 base_june = (np.sum(baseline_import_costs[mask_june]) - np.sum(orig_exports[mask_june] * fit_rate)) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
                 base_dec = (np.sum(baseline_import_costs[mask_dec]) - np.sum(orig_exports[mask_dec] * fit_rate)) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+                base_winter_net = (np.sum(baseline_import_costs[mask_winter]) - np.sum(orig_exports[mask_winter] * fit_rate)) * scaling_factor
+                base_summer_net = (np.sum(baseline_import_costs[mask_summer]) - np.sum(orig_exports[mask_summer] * fit_rate)) * scaling_factor
                 
                 detailed_results[tid]['baseline-no-battery'] = {'import': orig_imports, 'export': orig_exports, 'soc': np.zeros(n_samples)}
                 results.append({
@@ -687,6 +684,7 @@ class HomeBatteryCalculatorApp:
                     'Arbitrage': "Check Data" if (has_unknown_type or has_missing_rates) else "N/A", 'Imp_kWh': base_imp_kwh, 'Exp_kWh': base_exp_kwh,
                     'Import': annual_imp_base, 'Export': annual_exp_base, 
                     'June': base_june, 'Dec': base_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
+                    'Winter_Net': base_winter_net, 'Summer_Net': base_summer_net,
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': False
                 })
 
@@ -694,7 +692,7 @@ class HomeBatteryCalculatorApp:
                     strategy = all_strategies[strat_idx]
                     imports, exports, soc, is_arb = _run_simulation_from_arrays(
                         orig_imports, orig_exports, hours_array, months_array,
-                        import_prices_arr, fit_rate, force_charge_hours_24, strat_idx,
+                        import_prices_arr, fit_rate, fc_24, strat_idx,
                         usable_cap_kwh, min_soc_kwh, max_soc_kwh, grid_rte, solar_charge_eff,
                         charge_rate, mic, mec
                     )
@@ -718,6 +716,8 @@ class HomeBatteryCalculatorApp:
                     strat_imp_kwh, strat_exp_kwh = np.sum(imports), np.sum(exports)
                     strat_june = (np.sum(strategy_import_costs[mask_june]) - np.sum(exp_rev[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
                     strat_dec = (np.sum(strategy_import_costs[mask_dec]) - np.sum(exp_rev[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+                    strat_winter_net = (np.sum(strategy_import_costs[mask_winter]) - np.sum(exp_rev[mask_winter])) * scaling_factor
+                    strat_summer_net = (np.sum(strategy_import_costs[mask_summer]) - np.sum(exp_rev[mask_summer])) * scaling_factor
                     
                     arb_display = f"{is_arb:.2f} c/kWh" if (strategy not in ['baseline-no-battery', 'self-consumption'] and is_arb is not None and is_arb > 0) else "N/A"
                             
@@ -726,6 +726,7 @@ class HomeBatteryCalculatorApp:
                         'Imp_kWh': strat_imp_kwh, 'Exp_kWh': strat_exp_kwh,
                         'Import': annual_imp_cost, 'Export': annual_exp_rev, 
                         'June': strat_june, 'Dec': strat_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
+                        'Winter_Net': strat_winter_net, 'Summer_Net': strat_summer_net,
                         'Bill': net_bill, '_id': tid, 'is_dynamic': False
                     })
 
@@ -742,12 +743,15 @@ class HomeBatteryCalculatorApp:
                 
                 ideal_june = (np.sum(ideal_costs[mask_june]) - np.sum(ideal_exp_rev[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
                 ideal_dec = (np.sum(ideal_costs[mask_dec]) - np.sum(ideal_exp_rev[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+                ideal_winter_net = (np.sum(ideal_costs[mask_winter]) - np.sum(ideal_exp_rev[mask_winter])) * scaling_factor
+                ideal_summer_net = (np.sum(ideal_costs[mask_summer]) - np.sum(ideal_exp_rev[mask_summer])) * scaling_factor
 
                 results.append({
                     'Supplier': row['Supplier'], 'Tariff': tariff_label, 'Strategy': 'ideal-daily-adaptive', 
                     'Arbitrage': "Adaptive", 'Imp_kWh': np.sum(ideal_imp), 'Exp_kWh': np.sum(ideal_exp),
                     'Import': annual_ideal_imp_cost, 'Export': annual_ideal_exp_rev, 
                     'June': ideal_june, 'Dec': ideal_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
+                    'Winter_Net': ideal_winter_net, 'Summer_Net': ideal_summer_net,
                     'Bill': net_bill_ideal, '_id': tid, 'is_dynamic': False
                 })
 
@@ -792,6 +796,8 @@ class HomeBatteryCalculatorApp:
                 base_imp_kwh, base_exp_kwh = np.sum(orig_imports), np.sum(orig_exports)
                 base_june = (np.sum(baseline_import_costs[mask_june]) - np.sum(orig_exports[mask_june] * fit_rate_arr[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
                 base_dec = (np.sum(baseline_import_costs[mask_dec]) - np.sum(orig_exports[mask_dec] * fit_rate_arr[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+                base_winter_net = (np.sum(baseline_import_costs[mask_winter]) - np.sum(orig_exports[mask_winter] * fit_rate_arr[mask_winter])) * scaling_factor
+                base_summer_net = (np.sum(baseline_import_costs[mask_summer]) - np.sum(orig_exports[mask_summer] * fit_rate_arr[mask_summer])) * scaling_factor
                 
                 detailed_results[tid]['baseline-no-battery'] = {'import': orig_imports, 'export': orig_exports, 'soc': np.zeros(n_samples)}
                 results.append({
@@ -799,6 +805,7 @@ class HomeBatteryCalculatorApp:
                     'Arbitrage': "N/A", 'Imp_kWh': base_imp_kwh, 'Exp_kWh': base_exp_kwh,
                     'Import': annual_imp_base, 'Export': annual_exp_base, 
                     'June': base_june, 'Dec': base_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
+                    'Winter_Net': base_winter_net, 'Summer_Net': base_summer_net,
                     'Bill': net_bill_base, '_id': tid, 'is_dynamic': True
                 })
 
@@ -828,6 +835,8 @@ class HomeBatteryCalculatorApp:
                     strat_imp_kwh, strat_exp_kwh = np.sum(imports), np.sum(exports)
                     strat_june = (np.sum(strategy_import_costs[mask_june]) - np.sum(exp_rev[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
                     strat_dec = (np.sum(strategy_import_costs[mask_dec]) - np.sum(exp_rev[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+                    strat_winter_net = (np.sum(strategy_import_costs[mask_winter]) - np.sum(exp_rev[mask_winter])) * scaling_factor
+                    strat_summer_net = (np.sum(strategy_import_costs[mask_summer]) - np.sum(exp_rev[mask_summer])) * scaling_factor
                     
                     arb_display = f"{is_arb:.2f} c/kWh" if (strategy not in ['baseline-no-battery', 'self-consumption'] and is_arb is not None and is_arb > 0) else "N/A"
                             
@@ -836,6 +845,7 @@ class HomeBatteryCalculatorApp:
                         'Imp_kWh': strat_imp_kwh, 'Exp_kWh': strat_exp_kwh,
                         'Import': annual_imp_cost, 'Export': annual_exp_rev, 
                         'June': strat_june, 'Dec': strat_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
+                        'Winter_Net': strat_winter_net, 'Summer_Net': strat_summer_net,
                         'Bill': net_bill, '_id': tid, 'is_dynamic': True
                     })
 
@@ -852,12 +862,15 @@ class HomeBatteryCalculatorApp:
                 
                 ideal_june = (np.sum(ideal_costs[mask_june]) - np.sum(ideal_exp_rev[mask_june])) * (30.0 / days_june) + monthly_fixed if days_june > 0 else 0
                 ideal_dec = (np.sum(ideal_costs[mask_dec]) - np.sum(ideal_exp_rev[mask_dec])) * (31.0 / days_dec) + monthly_fixed if days_dec > 0 else 0
+                ideal_winter_net = (np.sum(ideal_costs[mask_winter]) - np.sum(ideal_exp_rev[mask_winter])) * scaling_factor
+                ideal_summer_net = (np.sum(ideal_costs[mask_summer]) - np.sum(ideal_exp_rev[mask_summer])) * scaling_factor
 
                 results.append({
                     'Supplier': dyn['Supplier'], 'Tariff': dyn['Tariff name'], 'Strategy': 'ideal-daily-adaptive', 
                     'Arbitrage': "Adaptive", 'Imp_kWh': np.sum(ideal_imp), 'Exp_kWh': np.sum(ideal_exp),
                     'Import': annual_ideal_imp_cost, 'Export': annual_ideal_exp_rev, 
                     'June': ideal_june, 'Dec': ideal_dec, 'Fixed': fixed_charges, 'Bonus': cash_bonus,
+                    'Winter_Net': ideal_winter_net, 'Summer_Net': ideal_summer_net,
                     'Bill': net_bill_ideal, '_id': tid, 'is_dynamic': True
                 })
 
@@ -937,7 +950,8 @@ class HomeBatteryCalculatorApp:
         self.update_subtabs_from_leaderboard()
         self.update_hdf_graph()
         
-        messagebox.showinfo("Success", "Sweep complete! Leaderboard populated.")
+        parent_win = self.telemetry_popup if (hasattr(self, 'telemetry_popup') and self.telemetry_popup and self.telemetry_popup.winfo_exists()) else self.root
+        messagebox.showinfo("Success", "Sweep complete! Leaderboard populated.", parent=parent_win)
 
     def refresh_kpi_cards(self, ev_exceeded_names=None):
         if self.leaderboard_data is None or self.leaderboard_data.empty: return
@@ -948,7 +962,9 @@ class HomeBatteryCalculatorApp:
         best_opt_bill = df_res[~baseline_mask]['Bill'].min() if not df_res[~baseline_mask].empty else 0
         
         total_savings = max(0.0, best_base_bill - best_opt_bill)
-        winning_row = df_res.iloc[0]
+        df_active = df_res[~baseline_mask]
+        if df_active.empty: return
+        winning_row = df_active.loc[df_active['Bill'].idxmin()]
         winning_strategy_name = str(winning_row['Strategy']).replace('-', ' ').title()
         
         self.lbl_kpi_savings.configure(text=f"€{total_savings:,.2f} / yr")
@@ -963,6 +979,7 @@ class HomeBatteryCalculatorApp:
             inverter_capex=self.roi_params.get('inverter_capex', 1500.0),
             grant_amount=self.roi_params.get('grant_amount', 2100.0),
             electricity_inflation_pct=self.roi_params.get('electricity_inflation_pct', 3.0),
+            discount_rate_pct=self.roi_params.get('discount_rate_pct', 5.0),
             annual_degradation_pct=self.roi_params.get('annual_degradation_pct', 2.0)
         )
         roi_results = FinancialROICalculator.calculate_roi(total_savings, roi_p)
@@ -998,7 +1015,7 @@ class HomeBatteryCalculatorApp:
         
         df_res = self.leaderboard_data
         baseline_mask = df_res['Strategy'] == 'baseline-no-battery'
-        top_3 = df_res[~baseline_mask].head(3).reset_index(drop=True)
+        top_3 = df_res[~baseline_mask].sort_values(by='Bill').head(3).reset_index(drop=True)
         
         for i, (_, row) in enumerate(top_3.iterrows()):
             if i >= len(self.top_tabs): break
@@ -1008,7 +1025,7 @@ class HomeBatteryCalculatorApp:
             self.right_notebook.tab(tab_ui['frame'], text=f"  #{i+1}: {row['Supplier']}  ")
             tab_ui['lbl_info'].configure(text=f"{i+1}. {row['Supplier']} - {row['Tariff']}\nWinning Strategy: {str(row['Strategy']).replace('-', ' ').title()}")
         
-        df_dynamic = df_res[(df_res.get('is_dynamic', False) == True) & (~baseline_mask)]
+        df_dynamic = df_res[(df_res.get('is_dynamic', False) == True) & (~baseline_mask)].sort_values(by='Bill')
         if not df_dynamic.empty:
             self.right_notebook.tab(self.top_tabs[3]['frame'], state='normal')
             best_dyn = df_dynamic.iloc[0]
@@ -1066,7 +1083,9 @@ class HomeBatteryCalculatorApp:
         filepath = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")], title="Save Results Table")
         if filepath:
             try:
-                export_df = self.leaderboard_data.copy().drop(columns=['_id', 'is_dynamic'], errors='ignore')
+                export_df = self.leaderboard_data.copy().sort_values(by='Bill').reset_index(drop=True)
+                export_df.insert(0, '#', export_df.index + 1)
+                export_df = export_df.drop(columns=['_id', 'is_dynamic'], errors='ignore')
                 export_df.to_csv(filepath, index=False)
                 messagebox.showinfo("Success", f"Leaderboard exported successfully to:\n{os.path.basename(filepath)}")
             except Exception as e:
@@ -1129,6 +1148,7 @@ class HomeBatteryCalculatorApp:
                 inverter_capex=self.roi_params.get('inverter_capex', 1500.0),
                 grant_amount=self.roi_params.get('grant_amount', 2100.0),
                 electricity_inflation_pct=self.roi_params.get('electricity_inflation_pct', 3.0),
+                discount_rate_pct=self.roi_params.get('discount_rate_pct', 5.0),
                 annual_degradation_pct=self.roi_params.get('annual_degradation_pct', 2.0)
             )
             roi_results = FinancialROICalculator.calculate_roi(annual_savings, roi_p)
@@ -1149,7 +1169,8 @@ class HomeBatteryCalculatorApp:
                 'mec': self.entry_mec.get()
             }
             
-            winning_row = self.leaderboard_data.iloc[0]
+            df_active = self.leaderboard_data[~baseline_mask]
+            winning_row = df_active.loc[df_active['Bill'].idxmin()] if not df_active.empty else self.leaderboard_data.iloc[0]
             
             dual_results = evaluate_dual_tariffs(self.leaderboard_data, self.df_hdf, self.dual_params)
             
