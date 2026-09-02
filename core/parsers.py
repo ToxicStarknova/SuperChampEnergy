@@ -155,13 +155,8 @@ def get_half_hourly_rates_for_row(row: pd.Series, date_range: pd.DatetimeIndex) 
         if pd.notna(raw_ev_overage) and str(raw_ev_overage).strip() != "":
             ev_overage_rate = float(raw_ev_overage) / 100.0
             has_overage_penalty = True
-        elif ev_rate is not None:
-            # When EV rate is present but no explicit overage is populated in CSV,
-            # utility contracts revert overage to the standard Day unit rate
-            ev_overage_rate = day_rate
-            has_overage_penalty = True
         else:
-            ev_overage_rate = day_rate
+            ev_overage_rate = ev_rate if ev_rate is not None else day_rate
             has_overage_penalty = False
     except (ValueError, TypeError):
         ev_overage_rate = day_rate
